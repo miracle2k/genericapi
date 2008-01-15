@@ -6,7 +6,6 @@ __all__ = (
     'JsonDispatcher'
 )
 
-# TODO: need alternative method (all public?) - document design decisions.
 def expose(func):
     """
     Add this to each method that you want to expose via the API.
@@ -21,7 +20,7 @@ def conceal(func):
     """
     The counterpart of 'expose' - explicitly hides a method from the API.
     """
-    func.concealed = True
+    func.exposed = False
     return func
 
 def dispatcher(*args):
@@ -66,6 +65,7 @@ class GenericAPI(Namespace):
     Things to note:
         * Decorate methods that you want to make available with @expose.
         * All methods in the class and all namespaces are static by default.
+        * Subclassing is supported for the API as well as single namespaces.
         
     If can expose methods by default, and hide on request:
     
@@ -75,6 +75,10 @@ class GenericAPI(Namespace):
         @conceal
         def private(): pass
         
+    In subclassing is used, expose_by_default only applies to the class it is
+    defined in. It does not change the behaviour of super or child classes.
+    exposes_by_default also works on Namespaces.
+        
     Use a dispatcher to make an API available via your urlconf.
     """
     def __new__(*args, **kwargs):
@@ -83,41 +87,64 @@ class GenericAPI(Namespace):
     @classmethod
     def resolve(self, path):
         """
-        Returns the method specified in the list (or tuple) in path, or None.
-        At this point, we do not yet check if the method is actually exposed.
+        Returns the exposed method specified in the list (or tuple) in path, or
+        raises an AttributeError if the path could not be resolved, or the
+        method targeted is not exposed.
         """
-        obj = self
-        for name in path:
-            # TODO: support base classes! handle private attributes correctly!
-            obj = obj.__dict__.get(name)
-            if obj is None: return None
-        # Note that we return the function object, not the staticmethod. We can
-        # also just pass "None" instead of the actual namespace object the
-        # method is possibly defined on, because Python's staticmethod()
-        # doesn't need it anyway.
-        if isinstance(obj, staticmethod):
-            return obj.__get__(obj, None)
-        else:
+        def _find(obj, index=0, parent_default_expose=None):
+            name = path[index]
+            
+            # only look in namespaces
+            if not issubclass(obj, Namespace): return None
+            # try to detect private members, which we never let access
+            if name.startswith('_%s__'%obj.__name__): return None
+        
+            # look for the current part of the path in the passed object and
+            # all it's super classes, recursively.
+            for obj in obj.__mro__:
+                if name in obj.__dict__:
+                    # expose_by_default is a bit though. We don't want it to
+                    # work though classic inheritance (i.e. each class has it's
+                    # own value), but namespaces should inherit the value from
+                    # their parents. so we drag the value from the current
+                    # object with us while handling the childs, and use it
+                    # when an object does not define the attribute itself.
+                    expose_by_default = \
+                        getattr(obj, 'expose_by_default', parent_default_expose)
+                        
+                    # if we don't have resolved the complete path yet, continue
+                    if index < len(path)-1:
+                        attr = _find(obj.__dict__[name], index+1, expose_by_default)
+                        # if we found something, return it, otherwise continue
+                        if attr: return attr
+                    
+                    # otherwise, check that what we have arrived it is valid,
+                    # callable etc., and then return it. otherwise just
+                    # continue the search.
+                    else:
+                        attr = obj.__dict__[name]
+                        # Try to resolve the staticmethod into a function via
+                        # the descriptor protocol..
+                        if isinstance(attr, staticmethod):
+                            method =  attr.__get__(obj)
+                            # check accessibility
+                            if getattr(method, 'exposed', expose_by_default):
+                                return method
+            # backtrack
             return None
+        
+        # from the root namespace (self), traverse the class hierarchy
+        attr = _find(self)
+        if not attr: raise AttributeError()
+        else: return attr
 
     @classmethod
     def execute(self, method, *args, **kwargs):
         """
-        Executes an exposed method with the given arguments. You can specify
-        the method either as a dotted string ("comments.add"), or as a function
-        type. If the method does not exist or is not exposed, an AttributeError
-        will be raised.
+        Mini-dispatcher that executes a method by it's name specified in
+        dotted notation.
         """
-        if isinstance(method, str):
-            method = self.resolve(method.split('.'))
-            if method is None: raise AttributeError()
-        
-        if not (getattr(method, 'exposed', False) or \
-                    (getattr(self, 'expose_by_default', False) and
-                     not getattr(method, 'concealed', False))):
-            raise AttributeError()
-        
-        method(*args, **kwargs)
+        return self.resolve(method.split('.'))(*args, **kwargs)
 
 class APIResponse(object):
     pass
@@ -163,7 +190,7 @@ class Dispatcher(object):
         Django Response object.
         # TODO: let the API class define error() handler methods
         """
-        method, args, kwargs = self.parse_request(request, url)
+        path, args, kwargs = self.parse_request(request, url)
         try:
             #if method.needs_key:
             #    if not self._api.check_key():
@@ -171,7 +198,8 @@ class Dispatcher(object):
             #if method.needs_auth:
             #    if not self._api.check_auth():
             #        raise AuthInvalid()
-            result = self.api.execute(method, args, kwargs)
+            method = self.api.resolve(path)
+            result = method(*args, **kwargs)
             return result
         except:
             # return error resposne
