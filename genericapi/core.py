@@ -1,7 +1,9 @@
 # encoding: utf-8
+import types
 
 __all__ = (
-    'expose', 'conceal', 'dispatcher', 'Namespace', 'GenericAPI'
+    'expose', 'conceal', 'dispatcher', 'Namespace', 'GenericAPI',
+    'JsonDispatcher'
 )
 
 # TODO: need alternative method (all public?) - document design decisions.
@@ -9,15 +11,19 @@ def expose(func):
     """
     Add this to each method that you want to expose via the API.
 
-    Internally, it just adds an 'expose' attribute to the function, which will be
-    picked up by DeclarativeHierarchyMetaclass. This should be considered an
-    implementation detail - it is not recommended that you add the attribute
-    manually.
+    Internally, it just adds an attribute to the function object, indicating
+    it's exposed status. This should be considered an implementation detail -
+    it is not recommended that you add the attribute manually.
     """
-    func.expose = True
+    func.exposed = True
     return func
 def conceal(func):
-    pass
+    """
+    The counterpart of 'expose' - explicitly hides a method from the API.
+    """
+    func.concealed = True
+    return func
+
 def dispatcher(*args):
     """
     Make this method or namespace only public via certain dispatchers.
@@ -26,122 +32,92 @@ def dispatcher(*args):
     """
     pass
 
-NAMESPACE_SEPERATOR = '.'
-
-def mkns(namespace, add):
-    result = namespace
-    if namespace and add: result += NAMESPACE_SEPERATOR
-    result += add
-    return result.lower()
-
-class DeclarativeHierarchyMetaclass(type):
+class MakeAllMethodsStatic(type):
     """
-    Metaclass that converts Field attributes to a dictionary called
-    'base_fields', taking into account parent class 'base_fields' as well.
+    Metaclass that convert makes all methods of a class static.
     """
     def __new__(cls, name, bases, attrs):
-        # first, create an instance...
-        methods = {}
-        for base in bases:
-            methods.update(getattr(base, 'methods', {}))
-        attrs.update({'methods': methods})
-
-        inst = type.__new__(cls, name, bases, attrs)
-        # ...then modify.
-        inst.add_namespace(attrs.items())
-        return inst
-
-    def add_namespace(cls, namespace, name=''):
-        """
-        Looks for API methods in the class specified by 'namespace',
-        and adds them to the method registration.
-
-        'namespace' really can be of any type, although Namespace or a
-        subclass are  recommended. It can also be any iterable that returns
-        tuples in the form of (fieldname, object).
-
-        'name' is the name to use for the namespace. If no name is specified,
-        the methods will be added at a root level.
-
-        Note that while/because this is defined in the metaclass, you'll be able
-        to call it on your API class, e.g.
-            def MyAPI(GenericAPI); MyAPI.add_namespace()
-        """
-        # if there is a __dict__, use it, otherwise assume an iterable.
-        if hasattr(namespace, '__dict__'): iterable = namespace.__dict__.items()
-        else: iterable = namespace
-
-        for field_name, field_obj in iterable:
-            # inner namespace class: recursively find all it's methods - use
-            # this field's name as the sub-namespace.
-            if isinstance(field_obj, type) and issubclass(field_obj, Namespace):
-                cls.add_namespace(field_obj, mkns(name, field_name))
-            # an api method: add at the current namespace level
-            elif hasattr(field_obj, 'expose'):
-                cls.add_method(field_obj, mkns(name, field_name))
-
-    def add_method(cls, method, name):
-        """
-        Adds the specified method to the APIs method registry. The name given
-        must be fully-qualified (i.e. include the namespace path). You can
-        use the mkns() function to build one.
-
-        Note that while/because this is defined in the metaclass, you'll be able
-        to call it on your API class, e.g.
-            def MyAPI(GenericAPI); MyAPI.add_method()
-        """
-        cls.methods.update({name: method})
+        for a in attrs:
+            if (isinstance(attrs[a], types.FunctionType) and not a in ['__new__']):
+                attrs[a] = staticmethod(attrs[a])
+        return type.__new__(cls, name, bases, attrs)
 
 class Namespace(object):
     """
-    Just used to identify the inner classes we care about. This also
-    allows the user of non-namespaces inner classes, as opposed to making
-    every inner class a namespace by default.
+    Just used to identify the inner classes we care about. This allows the use
+    of non-namespaces inner classes, as opposed to making every inner class a
+    namespace by default. Being explicit about this also reduces the change
+    of accidentally making methods accessible that are intended to be private.
     """
-    pass
+    __metaclass__ = MakeAllMethodsStatic
 
-class GenericAPI(object):
+class GenericAPI(Namespace):
     """
-    Baseclass for an API. It's metaclass will look for:
-
-        * every method declared in this class decorated with @expose
-        * every inner class subclassing Namespace, recursively
-        * each @expose-decorated method in each of those inner Namespace classes
-
-    It will then make all those methods available as classmethods in a
-    flat dict called 'methods', which might look like this:
-
-    methods = {
-        'genericapi.method1': method1,
-        'genericapi.namespace.method2': method2,
-        'genericapi.namespace.namespace.anothermethod': anothermethod,
-        'genericapi.users.get': get,
-        'genericapi.groups.get': get,
-        ...
-    }
-
-    Additional notes:
-
-        * The original methods and Namespace classes are retained.
-        * Subclassing is supported. API methods from base classes are availabe
-          as well.
-        * Subclassing of Namespace is currently *not* supported. API methods
-          in base classes will be ignored.
+    Baseclass for an API.
+    
+    class MyAPI(GenericAPI):
+        @expose
+        def echo(request, text): return text
+        
+        class comments(Namespace):
+            @expose
+            def add(request, text): pass
+            
+    Things to note:
+        * Decorate methods that you want to make available with @expose.
+        * All methods in the class and all namespaces are static by default.
+        
+    If can expose methods by default, and hide on request:
+    
+    class MyAPI(GenericAPI):
+        expose_by_default = True
+        def echo(request, text): return text
+        @conceal
+        def private(): pass
+        
+    Use a dispatcher to make an API available via your urlconf.
     """
-
-    __metaclass__ = DeclarativeHierarchyMetaclass
-
-    # leave instantiation out of the picture for now, to keep things less complex
     def __new__(*args, **kwargs):
-        raise Exception('You can not create instances of API classes.')
+        raise TypeError('API classes cannot be instantiated.')
+    
+    @classmethod
+    def resolve(self, path):
+        """
+        Returns the method specified in the list (or tuple) in path, or None.
+        At this point, we do not yet check if the method is actually exposed.
+        """
+        obj = self
+        for name in path:
+            # TODO: support base classes! handle private attributes correctly!
+            obj = obj.__dict__.get(name)
+            if obj is None: return None
+        # Note that we return the function object, not the staticmethod. We can
+        # also just pass "None" instead of the actual namespace object the
+        # method is possibly defined on, because Python's staticmethod()
+        # doesn't need it anyway.
+        if isinstance(obj, staticmethod):
+            return obj.__get__(obj, None)
+        else:
+            return None
 
     @classmethod
-    def execute(cls, methodname, *args, **kwargs):
+    def execute(self, method, *args, **kwargs):
         """
+        Executes an exposed method with the given arguments. You can specify
+        the method either as a dotted string ("comments.add"), or as a function
+        type. If the method does not exist or is not exposed, an AttributeError
+        will be raised.
         """
-        if not methodname in cls.methods:
-            raise Exception('%s is not a valid method name' % methodname)
-        return cls.methods[methodname](*args, **kwargs)
+        if isinstance(method, str):
+            method = self.resolve(method.split('.'))
+            if method is None: raise AttributeError()
+        
+        if not (getattr(method, 'exposed', False) or \
+                    (getattr(self, 'expose_by_default', False) and
+                     not getattr(method, 'concealed', False))):
+            raise AttributeError()
+        
+        method(*args, **kwargs)
 
 class APIResponse(object):
     pass
@@ -181,17 +157,22 @@ class Dispatcher(object):
         dispatch(*args, **kwargs)
 
     def dispatch(self, request, url):
-        method = get_method_name(url)
+        """
+        Resolves an incoming request to an API call, calls the method, and
+        returns it's result, converted via the response_class attribute, as a
+        Django Response object.
+        # TODO: let the API class define error() handler methods
+        """
+        method, args, kwargs = self.parse_request(request, url)
         try:
-            if method.needs_key:
-                if not self._api.check_key():
-                    raise KeyInvalid()
-            if method.needs_auth:
-                if not self._api.check_auth():
-                    raise AuthInvalid()
-
-            params = self.parse_request(request)
-            result = self._api.execute(method, params)
+            #if method.needs_key:
+            #    if not self._api.check_key():
+            #        raise KeyInvalid()
+            #if method.needs_auth:
+            #    if not self._api.check_auth():
+            #        raise AuthInvalid()
+            result = self.api.execute(method, args, kwargs)
+            return result
         except:
             # return error resposne
              #<response>
