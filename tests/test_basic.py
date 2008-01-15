@@ -1,7 +1,8 @@
 from shared import *
 
 # helper functions for testing api calls.
-def can_call(apicls, name, expect=True, *args, **kwargs):
+def can_call(apicls, name, *args, **kwargs):
+    expect = kwargs.pop('expect', True)
     assert apicls.execute(name, *args, **kwargs) == expect
 def cannot_call(apicls, name, *args, **kwargs):
     raises(AttributeError, apicls.execute, name, *args, **kwargs)
@@ -77,7 +78,6 @@ def test_inheritance():
     """
     Make sure inheritance works.
     """
-    
     class TestAPI(GenericAPI):
         @expose
         def root(): return True
@@ -129,18 +129,27 @@ def test_inheritance():
     can_call(TestAPIEx4, 'sub.exposed', expect=5)
     
     # simple multi-inheritance checks
-    class TestAPIEx4(TestAPI, SampleAPI):
-        pass
+    class TestAPIEx5(TestAPI, SampleAPI):
+        @expose
+        def new(): return True
+    can_call(TestAPIEx5, 'test.echo', 'foo', expect='foo')
+    can_call(TestAPIEx5, 'sub.exposed')
+    can_call(TestAPIEx5, 'new')
     
-    # expose_by_default should only affect it's own class method, and each
-    # class in the hierarchy is
-    
-    """c1
-        expose_by_default = False
-        not_exposed_method
-    c2
+    # expose_by_default should only affect the class it is set in (and child
+    # namespaces), but not super or child classes.
+    class ApiA(GenericAPI):
+        # expose_by_default defaults to False
+        def notexposed_a(): return True
+    class ApiB(ApiA):
         expose_by_default = True
-        not_exposed_method
-    c3
+        def notexposed_b(): return True
+    class ApiC(ApiB):
         expose_by_default = False
-        not_exposed_method """
+        def notexposed_c(): return True
+    cannot_call(ApiA, 'notexposed_a')
+    can_call(ApiB, 'notexposed_b')
+    cannot_call(ApiB, 'notexposed_a')
+    cannot_call(ApiC, 'notexposed_a')
+    can_call(ApiC, 'notexposed_b')
+    cannot_call(ApiC, 'notexposed_c')
