@@ -1,5 +1,8 @@
 # encoding: utf-8
-import types
+import types, re
+
+# TODO: implement signature enforcing
+# TODO: consumer namespaces that consume an element of the path
 
 __all__ = (
     'expose', 'conceal', 'dispatcher', 'Namespace', 'GenericAPI',
@@ -88,8 +91,8 @@ class GenericAPI(Namespace):
     def resolve(self, path):
         """
         Returns the exposed method specified in the list (or tuple) in path, or
-        raises an AttributeError if the path could not be resolved, or the
-        method targeted is not exposed.
+        None if the path could not be resolved, or the method targeted is not
+        exposed.
         """
         def _find(obj, index=0, parent_default_expose=None):
             name = path[index]
@@ -134,9 +137,7 @@ class GenericAPI(Namespace):
             return None
         
         # from the root namespace (self), traverse the class hierarchy
-        attr = _find(self)
-        if not attr: raise AttributeError()
-        else: return attr
+        return _find(self)
 
     @classmethod
     def execute(self, method, *args, **kwargs):
@@ -144,7 +145,9 @@ class GenericAPI(Namespace):
         Mini-dispatcher that executes a method by it's name specified in
         dotted notation.
         """
-        return self.resolve(method.split('.'))(*args, **kwargs)
+        method = self.resolve(method.split('.'))
+        if method is None: raise AttributeError()
+        else: return method(*args, **kwargs)
 
 class APIResponse(object):
     pass
@@ -174,69 +177,155 @@ class Dispatcher(object):
                 XmlRpcDispatcher(MyAPI, response_class=JsonResponse)),
     )
     """
+    
+    default_response_class = None
 
     # TODO: param: allow header auth
     def __init__(self, api, response_class=None):
         self.api = api
         self.response_class = response_class or self.default_response_class
 
-    def __call__(*args, **kwargs):
-        dispatch(*args, **kwargs)
+    def __call__(self, *args, **kwargs):
+        return self.dispatch(*args, **kwargs)
+        
+    def parse_request(self, request, url):
+        """
+        Override this when implementing a dispatcher. Must return a 3-tuple(!)
+        of (path, args, kwargs), with path being a list or tuple pointing
+        to the requested method (see also GenericAPI.resolve).
+        
+        The function can also return a list(!) of such 3-tuples if a unique
+        call cannot be determined. However, make sure the variants are always
+        exclusive. A situation where a wrong method could accidentally be must
+        not arise.
+        """
+        raise NotImplementedError()
 
-    def dispatch(self, request, url):
+    def dispatch(self, request, url=None):
         """
         Resolves an incoming request to an API call, calls the method, and
         returns it's result, converted via the response_class attribute, as a
         Django Response object.
-        # TODO: let the API class define error() handler methods
+        
+        request is a Django Request object. url is the sub-url of the
+        request to be resolved. If it is missing, request.path is used.
         """
-        path, args, kwargs = self.parse_request(request, url)
+        # TODO: let the API class define error() handler methods
+        resolved = self.parse_request(request, url or request.path)
+        if isinstance(resolved, tuple): resolved = [resolved]
+
+        # try to resolve to a method call
+        method = None
+        for path, args, kwargs in resolved:
+            method = self.api.resolve(path)
+            if method: break;
+
         try:
+            if method is None: raise AttributeError()
+        
+            # call the first method found
             #if method.needs_key:
             #    if not self._api.check_key():
             #        raise KeyInvalid()
             #if method.needs_auth:
             #    if not self._api.check_auth():
             #        raise AuthInvalid()
-            method = self.api.resolve(path)
-            result = method(*args, **kwargs)
-            return result
-        except:
+            result = method(request, *args, **kwargs)
+        except Exception, e:
+            raise TypeError(e)
             # return error resposne
              #<response>
              #   <status>failed</status>
              #   <error>A valid api_key is required to access this URL.</error>
              #  </response>
-            pass
         else:
-            # return response
-            return self.response_class(result)
+            return result
+            #return self.response_class(result)
 
 class JsonDispatcher(Dispatcher):
     """
-    Uses '/' as a namespace separator, a comma ',' for separating parameters,
-    and expects parameters to be Json encoded. Ignores any POST payload.
+    Uses '/' as a namespace separator, a comma ',' for separating arguments,
+    and expects arguments to be json encoded. Ignores any POST payload.
 
     GET /test
     ==> api.test()
 
     GET /test/x=200,y=["a","b","c"]
     ==> api.test(x=200, y=["a","b","c"])
-
-    String parameters do not necessarily need to be quoted, with the exception
-    of "true", "false", and "null":
-
-    GET /echo/"hello",world,"null"
-    ==> api.echo("hello", "world", "null")
-
-    GET /comments/add/great post!,author=null
-    ==> api.comments.add("great post!", author=None)
+    
+    Keyword arguments can also be passed via query string:
+    
+    GET /comments/add/"great post",author=null/?moderation=true
+    ==> api.comments.add("great post!", author=None, moderation=True)
     """
-
     default_response_class = JsonResponse
+    # TODO: allow simple strings option
+    # TODO: allow GET params option
+    
+    ident_regex = re.compile('^[_a-zA-Z][_a-zA-Z0-9]*$')
+    
+    def __parse(self, request, path, argstr):
+        # split the argument string. we can't use a regex, because we have to
+        # pay attention to json syntax, and python's regex engine doesn't
+        # support recursion or balancing groups (even php does!).
+        cur = ''; items = []
+        c_squares = 0; c_curlies = 0; quotes = False
+        for char in argstr:
+            cur += char
+            if char == '"': quotes = not quotes
+            else:
+                if not quotes:
+                    if char == '[': c_squares += 1
+                    elif char == ']': c_squares -= 1
+                    elif char == '{': c_curlies += 1
+                    elif char == '}': c_curlies -= 1
+                    else:
+                        if not any([c_curlies, c_squares]):
+                            if char == ',':
+                                items.append(cur[:-1])
+                                cur = ''
+        items.append(cur)
+        print items
 
-    def parse_url(self, request):
-        pass
+        # parse argument string via regex
+        args = []; kwargs = {}; kwmode = False
+        
+        # convert all arguments to python types
+        from django.utils import simplejson
+        for value in items:
+            name = None
+            value = simplejson.loads(value)
+            if name:
+                kwargs[name] = value
+            else:
+                args.append(value)
+        return path, args, kwargs
+
+    def parse_request(self, request, url):
+        # Split the path and remove empty items
+        path = filter(None, url.split('/'))
+        if path:
+            # Unless their are at least two items in path, there can not be any
+            # arguments at all.
+            if len(path) < 2:
+                return (path, [], {})
+            # If the last item is not an identifier, it must either be the
+            # argument portion, or an invalid call. We just assume the former.
+            # Note that there is no danger for the wrong function being
+            # accidently called because of this, as the previous identier in
+            # the path would have to be a namespace, and the call would fail
+            # anyway (albeit due to a different reason).
+            #
+            #   /namespace/call,  (=> accidental ",", considered an argument)
+            #   => error would be"namespace cannot be called" instead of
+            #      "namespace.call does not exist".
+            elif not self.ident_regex.match(path[-1]):
+                return self.__parse(request, path[:-1], path[-1])
+            # Otherwise, we can't say for sure if the last part is an attribute
+            # or not, so we return both options. For the same reasons outlined
+            # above, this is ok because it cannot lead to the wrong call.
+            else:
+                return [self.__parse(request, path[:-1], path[-1]), (path, [], {})]
 
 class RestDispatcher(Dispatcher):
     """
