@@ -2,11 +2,12 @@
 import types, re
 
 # TODO: implement signature enforcing
-# TODO: consumer namespaces that consume an element of the path
+# TODO: support namespaces that "consume" an element of the path
 
 __all__ = (
-    'expose', 'conceal', 'dispatcher', 'Namespace', 'GenericAPI',
-    'JsonDispatcher'
+    'expose', 'conceal', 'Namespace', 'GenericAPI',
+    'JsonDispatcher',
+    'BadRequestError', 'MethodNotFoundError',
 )
 
 def expose(func):
@@ -26,13 +27,14 @@ def conceal(func):
     func.exposed = False
     return func
 
-def dispatcher(*args):
-    """
-    Make this method or namespace only public via certain dispatchers.
-    @dispatcher('json', 'rest')
-    def apimethod(x): pass
-    """
-    pass
+class APIError(Exception):
+    # => similar constructor as APIResponse
+    message = None
+    code = None
+    http_status = None
+    http_headers = {}
+class BadRequestError(APIError): pass
+class MethodNotFoundError(APIError): pass
 
 class MakeAllMethodsStatic(type):
     """
@@ -56,37 +58,37 @@ class Namespace(object):
 class GenericAPI(Namespace):
     """
     Baseclass for an API.
-    
+
     class MyAPI(GenericAPI):
         @expose
         def echo(request, text): return text
-        
+
         class comments(Namespace):
             @expose
             def add(request, text): pass
-            
+
     Things to note:
         * Decorate methods that you want to make available with @expose.
         * All methods in the class and all namespaces are static by default.
         * Subclassing is supported for the API as well as single namespaces.
-        
+
     If can expose methods by default, and hide on request:
-    
+
     class MyAPI(GenericAPI):
         expose_by_default = True
         def echo(request, text): return text
         @conceal
         def private(): pass
-        
+
     In subclassing is used, expose_by_default only applies to the class it is
     defined in. It does not change the behaviour of super or child classes.
     exposes_by_default also works on Namespaces.
-        
+
     Use a dispatcher to make an API available via your urlconf.
     """
     def __new__(*args, **kwargs):
         raise TypeError('API classes cannot be instantiated.')
-    
+
     @classmethod
     def resolve(self, path):
         """
@@ -96,12 +98,13 @@ class GenericAPI(Namespace):
         """
         def _find(obj, index=0, parent_default_expose=None):
             name = path[index]
-            
+
             # only look in namespaces
-            if not issubclass(obj, Namespace): return None
+            if not (isinstance(obj, type) and issubclass(obj, Namespace)):
+                return None
             # try to detect private members, which we never let access
             if name.startswith('_%s__'%obj.__name__): return None
-        
+
             # look for the current part of the path in the passed object and
             # all it's super classes, recursively.
             for obj in obj.__mro__:
@@ -114,13 +117,13 @@ class GenericAPI(Namespace):
                     # when an object does not define the attribute itself.
                     expose_by_default = \
                         getattr(obj, 'expose_by_default', parent_default_expose)
-                        
+
                     # if we don't have resolved the complete path yet, continue
                     if index < len(path)-1:
                         attr = _find(obj.__dict__[name], index+1, expose_by_default)
                         # if we found something, return it, otherwise continue
                         if attr: return attr
-                    
+
                     # otherwise, check that what we have arrived it is valid,
                     # callable etc., and then return it. otherwise just
                     # continue the search.
@@ -135,7 +138,7 @@ class GenericAPI(Namespace):
                                 return method
             # backtrack
             return None
-        
+
         # from the root namespace (self), traverse the class hierarchy
         return _find(self)
 
@@ -149,14 +152,40 @@ class GenericAPI(Namespace):
         if method is None: raise AttributeError()
         else: return method(*args, **kwargs)
 
+from django.http import HttpResponse
+
 class APIResponse(object):
-    pass
+    """
+    Use can return this in your api funcs for additional options
+    return APIResponse(data, status=200, headers={})
+    => similar constructor as APIError
+    """
+    @classmethod
+    def make(self, data):
+        # if the data is an exception, we need to format it into a data object,
+        # while still preserving http status etc too => response object
+        if data is APIError:
+            data = data.to_response(data=self.format_error(data))
+
+        if data is APIResponse:
+            content = get_response(data.data)
+        else:
+            content = get_response(data)
+
+        return HttpResponse(content=content)
 
 class JsonResponse(APIResponse):
-    pass
+    def get_response(self, data):
+        return HttpResponse()
 
 class XmlRpcResponse(APIResponse):
-    pass
+    def get_response(self, data):
+        if isinstance(data, APIError):
+            # convert to fault xmlrpc message
+            pass
+        else:
+            # convert standard
+            pass
 
 class Dispatcher(object):
     """
@@ -177,7 +206,7 @@ class Dispatcher(object):
                 XmlRpcDispatcher(MyAPI, response_class=JsonResponse)),
     )
     """
-    
+
     default_response_class = None
 
     # TODO: param: allow header auth
@@ -187,42 +216,58 @@ class Dispatcher(object):
 
     def __call__(self, *args, **kwargs):
         return self.dispatch(*args, **kwargs)
-        
+
+    def format_error(self, error):
+        """
+        Convert the exception in error into a data object. as there is no "one
+        way" to do this, we let the user handle it via a special function
+        defined in the API class. The base class provides a default
+        implementation, so this is optional.
+        """
+        pass
+
     def parse_request(self, request, url):
         """
         Override this when implementing a dispatcher. Must return a 3-tuple(!)
         of (path, args, kwargs), with path being a list or tuple pointing
         to the requested method (see also GenericAPI.resolve).
-        
+
         The function can also return a list(!) of such 3-tuples if a unique
         call cannot be determined. However, make sure the variants are always
         exclusive. A situation where a wrong method could accidentally be must
         not arise.
+
+        Should a problem occur that prevents from returning a meaningful result,
+        raise a BadRequestError.
         """
         raise NotImplementedError()
+    del parse_request
 
     def dispatch(self, request, url=None):
         """
         Resolves an incoming request to an API call, calls the method, and
         returns it's result, converted via the response_class attribute, as a
         Django Response object.
-        
+
         request is a Django Request object. url is the sub-url of the
         request to be resolved. If it is missing, request.path is used.
         """
-        # TODO: let the API class define error() handler methods
-        resolved = self.parse_request(request, url or request.path)
-        if isinstance(resolved, tuple): resolved = [resolved]
-
-        # try to resolve to a method call
-        method = None
-        for path, args, kwargs in resolved:
-            method = self.api.resolve(path)
-            if method: break;
+        if not hasattr(self, 'parse_request'):
+            raise NotImplementedError()
 
         try:
-            if method is None: raise AttributeError()
-        
+            # TODO: let the API class define error() handler methods
+            resolved = self.parse_request(request, url or request.path)
+            if isinstance(resolved, tuple): resolved = [resolved]
+
+            # try to resolve to a method call
+            method = None
+            for path, args, kwargs in resolved:
+                method = self.api.resolve(path)
+                if method: break;
+            if method is None:
+                raise MethodNotFoundError()
+
             # call the first method found
             #if method.needs_key:
             #    if not self._api.check_key():
@@ -230,75 +275,57 @@ class Dispatcher(object):
             #if method.needs_auth:
             #    if not self._api.check_auth():
             #        raise AuthInvalid()
+            # raises TypeError
             result = method(request, *args, **kwargs)
-        except Exception, e:
-            raise TypeError(e)
-            # return error resposne
-             #<response>
-             #   <status>failed</status>
-             #   <error>A valid api_key is required to access this URL.</error>
-             #  </response>
+        # Catch our own errors only. everything else will bubble up to Django's
+        # exception handling. If you don't want that, you can always handle
+        # them in your custom dispatcher.
+        except APIError, e:
+            result = e
+
+        if not self.response_class:
+            # raise exception or return unmodified, or .data in APIResponse case
+            pass
         else:
-            return result
-            #return self.response_class(result)
+            return self.response_class().get_response(result)
 
 class JsonDispatcher(Dispatcher):
     """
-    Uses '/' as a namespace separator, a comma ',' for separating arguments,
-    and expects arguments to be json encoded. Ignores any POST payload.
+    Reads the method name from the URL, using '/' as a namespace separator.
+    Arguments are passed via the querystring, and as such, only keyword
+    arguments are supported. The exception is one (!) positional argument that
+    can be appended to the url. All arguments are expected to be formatted in
+    json. Ignores any POST payload.
 
     GET /test
     ==> api.test()
 
-    GET /test/x=200,y=["a","b","c"]
-    ==> api.test(x=200, y=["a","b","c"])
-    
-    Keyword arguments can also be passed via query string:
-    
-    GET /comments/add/"great post",author=null/?moderation=true
-    ==> api.comments.add("great post!", author=None, moderation=True)
+    GET /echo/["hello world"]
+    ==> api.test(["hello world"])
+
+    GET /comments/add/"great post"/?moderation=true&author=null
+    ==> api.comments.add("great post!", moderation=True, author=None)
     """
     default_response_class = JsonResponse
     # TODO: allow simple strings option
     # TODO: allow GET params option
-    
-    ident_regex = re.compile('^[_a-zA-Z][_a-zA-Z0-9]*$')
-    
-    def __parse(self, request, path, argstr):
-        # split the argument string. we can't use a regex, because we have to
-        # pay attention to json syntax, and python's regex engine doesn't
-        # support recursion or balancing groups (even php does!).
-        cur = ''; items = []
-        c_squares = 0; c_curlies = 0; quotes = False
-        for char in argstr:
-            cur += char
-            if char == '"': quotes = not quotes
-            else:
-                if not quotes:
-                    if char == '[': c_squares += 1
-                    elif char == ']': c_squares -= 1
-                    elif char == '{': c_curlies += 1
-                    elif char == '}': c_curlies -= 1
-                    else:
-                        if not any([c_curlies, c_squares]):
-                            if char == ',':
-                                items.append(cur[:-1])
-                                cur = ''
-        items.append(cur)
-        print items
 
-        # parse argument string via regex
-        args = []; kwargs = {}; kwmode = False
-        
-        # convert all arguments to python types
+    ident_regex = re.compile('^[_a-zA-Z][_a-zA-Z0-9]*$')
+
+    def __parse(self, request, path, argstr):
         from django.utils import simplejson
-        for value in items:
-            name = None
-            value = simplejson.loads(value)
-            if name:
-                kwargs[name] = value
-            else:
-                args.append(value)
+
+        # convert the positional argument from json to python
+        if argstr:
+            try: args = [simplejson.loads(argstr)]
+            except ValueError, e: raise BadRequestError(e)
+        else:
+            args = []
+
+        # convert json query strings into kwargs array
+        kwargs = {}
+        for key, value in request.GET.items():
+            kwargs[str(key)] = simplejson.loads(value)
         return path, args, kwargs
 
     def parse_request(self, request, url):
@@ -308,7 +335,7 @@ class JsonDispatcher(Dispatcher):
             # Unless their are at least two items in path, there can not be any
             # arguments at all.
             if len(path) < 2:
-                return (path, [], {})
+                return self.__parse(request, path, '')
             # If the last item is not an identifier, it must either be the
             # argument portion, or an invalid call. We just assume the former.
             # Note that there is no danger for the wrong function being
@@ -322,10 +349,14 @@ class JsonDispatcher(Dispatcher):
             elif not self.ident_regex.match(path[-1]):
                 return self.__parse(request, path[:-1], path[-1])
             # Otherwise, we can't say for sure if the last part is an attribute
-            # or not, so we return both options. For the same reasons outlined
-            # above, this is ok because it cannot lead to the wrong call.
+            # or not, so we try to return both options. This is ok for the same
+            # reasons outlined above: it cannot lead to the wrong call.
             else:
-                return [self.__parse(request, path[:-1], path[-1]), (path, [], {})]
+                # if an error is raised at this point for the argument option,
+                # then we already know it can't work out, and leave it off.
+                try: option1 = self.__parse(request, path[:-1], path[-1])
+                except BadRequestError: option1 = None
+                return (option1 and [option1] or []) + [(path, [], {})]
 
 class RestDispatcher(Dispatcher):
     """

@@ -17,13 +17,14 @@ def test_class():
     class TestAPI(GenericAPI):
         class SortedDict(dict):
             def sort(self): self.items()
+        class test(Namespace): pass
     TestAPI.SortedDict().sort()
     
     # instances are not allowed
     raises(TypeError, TestAPI)
     
     # [bug] make sure we keep the correct name
-    SampleAPI.test.__name__ = 'test'
+    TestAPI.test.__name__ = 'test'
 
 def test_accessibility():
     """Make sure we can and cannot access the right functions."""
@@ -129,11 +130,17 @@ def test_inheritance():
     can_call(TestAPIEx4, 'sub.exposed', expect=5)
     
     # simple multi-inheritance checks
-    class TestAPIEx5(TestAPI, SampleAPI):
+    class AnotherAPI(GenericAPI):
+        @expose
+        def echo(text): return text
+    class AnotherNamespace(Namespace):
+        @expose
+        def call(): return True
+    class TestAPIEx5(TestAPI, AnotherAPI, AnotherNamespace):
         @expose
         def new(): return True
-    can_call(TestAPIEx5, 'test.echo', 'foo', expect='foo')
-    can_call(TestAPIEx5, 'sub.exposed')
+    can_call(TestAPIEx5, 'echo', 'foo', expect='foo')
+    can_call(TestAPIEx5, 'call')
     can_call(TestAPIEx5, 'new')
     
     # expose_by_default should only affect the class it is set in (and child
