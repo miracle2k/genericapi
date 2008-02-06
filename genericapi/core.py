@@ -10,9 +10,9 @@ from django.http import HttpResponse
 # urlconf, the dispatcher only resolves parameters.
 
 __all__ = (
-    'expose', 'conceal', 'Namespace', 'GenericAPI',
+    'expose', 'conceal', 'check_key', 'Namespace', 'GenericAPI',
     'JsonDispatcher',
-    'BadRequestError', 'MethodNotFoundError',
+    'BadRequestError', 'MethodNotFoundError', 'InvalidKeyError',
 )
 
 def expose(func):
@@ -25,12 +25,31 @@ def expose(func):
     """
     func.exposed = True
     return func
+
 def conceal(func):
     """
     The counterpart of 'expose' - explicitly hides a method from the API.
     """
     func.exposed = False
     return func
+
+def check_key(check_key_func):
+    """
+    Allows to specificy custom api key validation on a per-method level:
+    
+    @expose
+    @check_key(lambda request, key: key == 'topsecret')
+    def add(request): return True
+    
+    Passing ``False`` for the validation function disables the key requirement
+    for this method.
+    
+    Internally, it just adds an attribute to the function object.
+    """
+    def decorator(apply_to_func):
+        apply_to_func.check_key = check_key_func
+        return apply_to_func
+    return decorator
 
 class APIError(Exception):
     """
@@ -50,8 +69,9 @@ class APIError(Exception):
     def __init__(self, message="", code=None, http_status=None, http_headers=None):
         self.message, self.code = message, code
         self.http_status, self.http_headers = http_status, http_headers
-class BadRequestError(APIError): pass
 class MethodNotFoundError(APIError): pass
+class InvalidKeyError(APIError): pass
+class BadRequestError(APIError): pass
 
 class apimethod(object):
     """
@@ -82,13 +102,13 @@ class NamespaceOptions(object):
         self.check_key = check_key and check_key.im_func or None
     def __getattribute__(self, attr):
         """
-        If a vale is ``None``, automatically fall back to the parent
+        If a value is ``None``, automatically fall back to the parent
         namespace's options.
         """
         val = super(NamespaceOptions, self).__getattribute__(attr)
         parent = super(NamespaceOptions, self).__getattribute__('parent')
         if val is None and parent:
-            return getattr(parent._meta, attr)
+            return getattr(parent, attr)
         return val
 
 class Namespace(object):
@@ -113,12 +133,10 @@ class NamespaceMetaclass(type):
         opts = NamespaceOptions(attrs.pop('Meta', None))
         attrs['_meta'] = opts
         
-        def is_func_attr(a):
-            return isinstance(attrs[a], types.FunctionType) and \
-                   not a in ['__new__']
         # convert all functions to static ``apimethod``s.
         for a in attrs:
-            if is_func_attr(a): attrs[a] = apimethod(attrs[a])
+            if isinstance(attrs[a], types.FunctionType) and not a in ['__new__']:
+                attrs[a] = apimethod(attrs[a])
 
         # create the namespace
         self = type.__new__(cls, name, bases, attrs)
@@ -127,10 +145,11 @@ class NamespaceMetaclass(type):
         # sub-namespaces and methods.
         for a in attrs:
             attr = getattr(self, a)
-            if is_func_attr(a): attr._namespace = self
+            if isinstance(attr, apimethod):
+                attr._namespace = self
             # this is the code that requires the ``Namespace`` forward decl
             elif isinstance(attr, type) and issubclass(attr, Namespace):
-                attr._meta.parent = self
+                attr._meta.parent = self._meta
                 
         return self
 
@@ -409,11 +428,26 @@ class Dispatcher(object):
             if method is None:
                 raise MethodNotFoundError()
             
-            if self.api._meta.check_key:
-                key = kwargs.pop(self.api._meta.key_argument, None) or \
-                    request and request.get(self.api._meta.key_header, None)
-                if not self.api._meta.check_key(request, key):
-                    raise BadRequestError()
+            # helper that returns the first "not None" item of a sequence
+            first = lambda *a: reduce(lambda x,y: x is not None and x or y, a)
+            first = lambda *a: filter(lambda x: x is not None, a)[0]
+            
+            # validate api key: first, check if we we need to require a key at
+            # all, and if so, what the function doing the validation is. if
+            # there is no method-specific validator, try the one from the
+            # namespace. note that the method saying ``False`` means key auth
+            # is not required for this call.
+            meta = method._namespace._meta
+            check_key = getattr(method, 'check_key', None)
+            if check_key is None:
+                check_key = meta.check_key
+            # find the correct key to use, from arguments and http headers
+            if check_key:
+                key = kwargs.pop(first(meta.key_argument, 'apikey'), None) or \
+                      request and request.META.get(first(meta.key_header, 'X-APIKEY'))
+                if not check_key(request, key):
+                    raise InvalidKeyError()
+                
             #if method.needs_key:
             #    if not self._api.check_key():
             #        raise KeyInvalid()
@@ -424,6 +458,8 @@ class Dispatcher(object):
 
             # call the first method found
             try:
+                # TODO: check and comüare signatures to allow for more detailed
+                # error messages ("argument X not supported" etc.)
                 result = method(request, *args, **kwargs)
             except TypeError, e:
                 raise BadRequestError()
