@@ -101,7 +101,7 @@ def test_inheritance():
     # call to method in a namespace of a super class
     can_call(TestAPIEx, 'sub.exposed')
     
-    # check that super class methods can be hidden by override
+    # check that superclass methods can be hidden by override
     class TestAPIEx2(TestAPI):
         class sub(TestAPI.sub):
             @expose
@@ -117,7 +117,7 @@ def test_inheritance():
     
     # [bug] makes sure backtracking works while resolving methods. the child
     # class has 'sub', but not 'other", so the code needs to go back and check
-    # the super classes for a "sub" namespace with an "other" method.
+    # the superclasses for a "sub" namespace with an "other" method.
     can_call(TestAPIEx3, 'sub.other')
     # the same should be true of a certain node turns out to exist, but is
     # not exposed or otherwise not valid.

@@ -3,14 +3,15 @@ import types, re
 
 from django.http import HttpResponse
 
-# TODO: implement signature enforcing
+# TODO: implement signature enforcing (includes types, "int" etc).
 # TODO: support namespaces that "consume" an element of the path
 # TODO: support JSONP callbacks
 # TODO: support per_method dispatching: api views are hooked manually into
 # urlconf, the dispatcher only resolves parameters.
 
 __all__ = (
-    'expose', 'conceal', 'check_key', 'Namespace', 'GenericAPI',
+    'expose', 'conceal', 'check_key', 'process_call',
+    'Namespace', 'GenericAPI',
     'JsonDispatcher',
     'BadRequestError', 'MethodNotFoundError', 'InvalidKeyError',
 )
@@ -51,6 +52,24 @@ def check_key(check_key_func):
         return apply_to_func
     return decorator
 
+def process_call(process_call_func):
+    """
+    Allows to specificy custom process_call handlers on a per-method level:
+
+    @expose
+    @process_call(require_login_session)
+    def add(request): return True
+
+    Passing ``False`` for the validation function disables the key requirement
+    for this method.
+
+    Internally, it just adds an attribute to the function object.
+    """
+    def decorator(apply_to_func):
+        apply_to_func.process_call = process_call_func
+        return apply_to_func
+    return decorator
+
 class APIError(Exception):
     """
     Base class for all API-related exceptions. Raising ``APIError``s in your
@@ -86,7 +105,10 @@ class apimethod(object):
     def __call__(self, *args, **kwargs):
       return self.func(*args, **kwargs)
     def __getattr__(self, name):
-        """Fall back to function object itself."""
+        """
+        Fall back to function object itself. Attributes set via decorators are
+        usually found there.
+        """
         return getattr(self.func, name)
 
 class NamespaceOptions(object):
@@ -99,7 +121,9 @@ class NamespaceOptions(object):
         self.key_header = getattr(options, 'key_header', None)
         self.key_argument = getattr(options, 'key_argument', None)
         check_key = getattr(options, 'check_key', None)
-        self.check_key = check_key and check_key.im_func or None
+        self.check_key = check_key and check_key.im_func or check_key
+        process_call = getattr(options, 'process_call', None)
+        self.process_call = process_call and process_call.im_func or process_call
     def __getattribute__(self, attr):
         """
         If a value is ``None``, automatically fall back to the parent
@@ -369,7 +393,10 @@ class Dispatcher(object):
     # Child classes can specify this
     default_response_class = None
 
-    # TODO: param: allow header auth
+    # TODO: Do we want to support allowing/disallow authenticiation (key and
+    # other) via headers or arguments. It's currently configured via the Meta
+    # subclasses of an API, which is pretty flexible, but logicially it might
+    # belong on the dispatcher level?
     def __init__(self, api, response_class=default_response_class):
         self.api = api
         self.response_class = response_class
@@ -429,14 +456,13 @@ class Dispatcher(object):
                 raise MethodNotFoundError()
             
             # helper that returns the first "not None" item of a sequence
-            first = lambda *a: reduce(lambda x,y: x is not None and x or y, a)
             first = lambda *a: filter(lambda x: x is not None, a)[0]
             
             # validate api key: first, check if we we need to require a key at
             # all, and if so, what the function doing the validation is. if
             # there is no method-specific validator, try the one from the
-            # namespace. note that the method saying ``False`` means key auth
-            # is not required for this call.
+            # namespace. note that ``False`` means key auth is not required
+            # for this call.
             meta = method._namespace._meta
             check_key = getattr(method, 'check_key', None)
             if check_key is None:
@@ -448,18 +474,32 @@ class Dispatcher(object):
                 if not check_key(request, key):
                     raise InvalidKeyError()
                 
-            #if method.needs_key:
-            #    if not self._api.check_key():
-            #        raise KeyInvalid()
-            #if method.needs_auth:
-            #    if not self._api.check_auth():
-            #        raise AuthInvalid()
-            # raises TypeError
+            # handle pre-processing
+            process_call = getattr(method, 'process_call', None)
+            if process_call is None:
+                process_call = meta.process_call
+            # If a pre-processors was found, call it first. call processors
+            # may raise exceptions, or return a new ``apimethod`` object
+            # that will be called instead. Additionally, a return value of
+            # ``True`` will have no effect, while ``False`` will cause an
+            # exception to be raised.
+            # note that we cannot let the processor call the api view itself.
+            # As ``None`` is a valid response for api views, we would not be
+            # able to determine whether that has been done or not.
+            if process_call:
+                process_result = process_call(request, method, args, kwargs)
+                if process_result is False:
+                    raise BadRequestError()
+                elif process_result is True:
+                    pass
+                elif process_result:
+                    method = process_result
 
             # call the first method found
             try:
-                # TODO: check and comüare signatures to allow for more detailed
-                # error messages ("argument X not supported" etc.)
+                # TODO: Check and compare method signatures to allow for more
+                # detailed error messages ("argument X not supported" etc.)
+                # finally, call the function itself.
                 result = method(request, *args, **kwargs)
             except TypeError, e:
                 raise BadRequestError()
