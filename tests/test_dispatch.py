@@ -11,7 +11,8 @@ def make_request(url):
     return r
 
 class SampleAPI(GenericAPI):
-    expose_by_default = True
+    class Meta: expose_by_default = True
+    def noop(request): return None
     def give_me_true(request): return True
     def negate_bool(request, b): return not b
     def add(request, a, b): return a+b
@@ -21,12 +22,6 @@ class SampleAPI(GenericAPI):
     class ns(Namespace):
         def give_me_false(request): return False
 
-    def __format_error(e):
-        return 
-    def complex(request, a):
-        if a is None:
-            raise APIError('must specify a')
-
 def test_common():
     """Common dispatcher stuff"""
     request = make_request('/')
@@ -34,13 +29,18 @@ def test_common():
     raises(NotImplementedError, Dispatcher(SampleAPI), request)
 
 def test_json_dispatch():
+    # note we are not using a response class. ``JSONResponse``
+    # is tested separately.
     dispatcher = JsonDispatcher(SampleAPI, response_class=None)
 
     # simple, argument-less calls
     assert dispatcher(make_request('/give_me_true')) == True
     assert dispatcher(make_request('/ns/give_me_false')) == False
-
-    # TODO: invalid calls
+    # ``None`` should be a valid response
+    assert dispatcher(make_request('/noop')) == None
+    
+    # invalid calls
+    raises(MethodNotFoundError, "dispatcher(make_request('/give_me_5'))")
 
     # "special" positional argument
     assert dispatcher(make_request('/negate_bool/true')) == False
@@ -52,9 +52,9 @@ def test_json_dispatch():
     assert dispatcher(make_request('/add/?a=1&b=5')) == 6
     assert dispatcher(make_request('/make_dict/?a="b"&b="c"&c="a"')) == \
                                                 {'a': 'b', 'b': 'c', 'c': 'a'}
-
     # invalid keyword arguments
-    # TODO
+    raises(BadRequestError, "dispatcher(make_request('/add/?a=1'))")
+    raises(BadRequestError, "dispatcher(make_request('/add/?a=1&b=2&c=1'))")
 
     # mixed positional and keyword arguments
     assert dispatcher(make_request('/add/3?b=4')) == 7

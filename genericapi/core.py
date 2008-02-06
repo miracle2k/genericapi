@@ -1,8 +1,13 @@
 # encoding: utf-8
 import types, re
 
+from django.http import HttpResponse
+
 # TODO: implement signature enforcing
 # TODO: support namespaces that "consume" an element of the path
+# TODO: support JSONP callbacks
+# TODO: support per_method dispatching: api views are hooked manually into
+# urlconf, the dispatcher only resolves parameters.
 
 __all__ = (
     'expose', 'conceal', 'Namespace', 'GenericAPI',
@@ -28,32 +33,79 @@ def conceal(func):
     return func
 
 class APIError(Exception):
-    # => similar constructor as APIResponse
-    message = None
-    code = None
-    http_status = None
-    http_headers = {}
+    """
+    Base class for all API-related exceptions. Raising ``APIError``s in your
+    views is the recommended way to handle errors - dispatchers usually convert
+    them into an error response in the appropriate format.
+    
+    ``__init__`` takes the the optional arguments ``message`` and ``code``,
+    which hold details about the error occured, as well as ``http_status`` and
+    ``http_headers`` that are used when the error is converted to a HTTP
+    response.
+
+    See also ``APIResponse``, which has a similar interface.
+
+    Views can also return Exception instances instead of raising them.
+    """
+    def __init__(self, message="", code=None, http_status=None, http_headers=None):
+        self.message, self.code = message, code
+        self.http_status, self.http_headers = http_status, http_headers
 class BadRequestError(APIError): pass
 class MethodNotFoundError(APIError): pass
 
-class MakeAllMethodsStatic(type):
+class apimethod(object):
     """
-    Metaclass that convert makes all methods of a class static.
+    We frequently assign attributes to api views, which ``staticmethod`` makes
+    very hard, as it's readonly. Using our own version instead makes everything
+    much less complex (otherwise, we'd attach the attributes to to the function
+    object itself, which we have to retrieve via the descriptor protocol
+    (__get__) everytime we need access).
+    """
+    def __init__(self, func):
+        self.func = func
+    def __call__(self, *args, **kwargs):
+      return self.func(*args, **kwargs)
+    def __getattr__(self, name):
+        """Fall back to function object itself."""
+        return getattr(self.func, name)
+
+class NamespaceOptions(object):
+    """
+    Holds the options defined in a ``Meta`` subclass.
+    """
+    def __init__(self, options=None):
+        self.expose_by_default = getattr(options, 'expose_by_default', None)
+        self.key_header = getattr(options, 'key_header', None)
+        self.key_argument = getattr(options, 'key_argument', None)
+        self.check_key = getattr(options, 'check_key', None)
+        if self.check_key: self.check_key = self.check_key.im_func
+
+class NamespaceMetaclass(type):
+    """
+    Makes all methods of the class static, and converts the ``Meta`` subclass
+    to an attribute.
     """
     def __new__(cls, name, bases, attrs):
+        opts = NamespaceOptions(attrs.pop('Meta', None))
+        attrs['_meta'] = opts
+        
         for a in attrs:
             if (isinstance(attrs[a], types.FunctionType) and not a in ['__new__']):
-                attrs[a] = staticmethod(attrs[a])
+                attrs[a] = apimethod(attrs[a])
+                # add a reference to the namespaces options
+                attrs[a]._meta = opts
+
         return type.__new__(cls, name, bases, attrs)
 
 class Namespace(object):
+    from django.newforms import ModelForm
     """
     Just used to identify the inner classes we care about. This allows the use
     of non-namespaces inner classes, as opposed to making every inner class a
     namespace by default. Being explicit about this also reduces the change
     of accidentally making methods accessible that are intended to be private.
     """
-    __metaclass__ = MakeAllMethodsStatic
+    __metaclass__ = NamespaceMetaclass
 
 class GenericAPI(Namespace):
     """
@@ -68,21 +120,22 @@ class GenericAPI(Namespace):
             def add(request, text): pass
 
     Things to note:
-        * Decorate methods that you want to make available with @expose.
+        * Decorate methods that you want to make available with ``@expose``.
         * All methods in the class and all namespaces are static by default.
         * Subclassing is supported for the API as well as single namespaces.
 
     If can expose methods by default, and hide on request:
 
     class MyAPI(GenericAPI):
-        expose_by_default = True
+        class Meta:
+            expose_by_default = True
         def echo(request, text): return text
         @conceal
         def private(): pass
 
-    In subclassing is used, expose_by_default only applies to the class it is
-    defined in. It does not change the behaviour of super or child classes.
-    exposes_by_default also works on Namespaces.
+    If subclassing is used, ``expose_by_default`` only applies to the class it
+    is defined in. It does not change the behaviour of super or child classes.
+    ``exposes_by_default`` also works on namespaces.
 
     Use a dispatcher to make an API available via your urlconf.
     """
@@ -110,13 +163,14 @@ class GenericAPI(Namespace):
             for obj in obj.__mro__:
                 if name in obj.__dict__:
                     # expose_by_default is a bit though. We don't want it to
-                    # work though classic inheritance (i.e. each class has it's
-                    # own value), but namespaces should inherit the value from
-                    # their parents. so we drag the value from the current
+                    # work through classic inheritance (i.e. each class has
+                    # it's own value), but namespaces should inherit the value
+                    # from their parents. So we drag the value from the current
                     # object with us while handling the childs, and use it
                     # when an object does not define the attribute itself.
-                    expose_by_default = \
-                        getattr(obj, 'expose_by_default', parent_default_expose)
+                    expose_by_default = obj._meta.expose_by_default
+                    if expose_by_default is None:
+                        expose_by_default = parent_default_expose
 
                     # if we don't have resolved the complete path yet, continue
                     if index < len(path)-1:
@@ -128,12 +182,8 @@ class GenericAPI(Namespace):
                     # callable etc., and then return it. otherwise just
                     # continue the search.
                     else:
-                        attr = obj.__dict__[name]
-                        # Try to resolve the staticmethod into a function via
-                        # the descriptor protocol..
-                        if isinstance(attr, staticmethod):
-                            method =  attr.__get__(obj)
-                            # check accessibility
+                        method = obj.__dict__[name]
+                        if isinstance(method, apimethod):
                             if getattr(method, 'exposed', expose_by_default):
                                 return method
             # backtrack
@@ -143,43 +193,106 @@ class GenericAPI(Namespace):
         return _find(self)
 
     @classmethod
-    def execute(self, method, *args, **kwargs):
+    def execute(self, method, request=None, *args, **kwargs):
         """
         Mini-dispatcher that executes a method by it's name specified in
-        dotted notation.
+        dotted notation. If ``request`` is not passed in, ``None`` is used
+        automatically, but this might break your views, of course.
         """
-        method = self.resolve(method.split('.'))
-        if method is None: raise AttributeError()
-        else: return method(*args, **kwargs)
-
-from django.http import HttpResponse
+        return SimpleDispatcher(self, None).dispatch(method, request, *args, **kwargs)
 
 class APIResponse(object):
     """
-    Use can return this in your api funcs for additional options
-    return APIResponse(data, status=200, headers={})
-    => similar constructor as APIError
+    An "API response" is used by the depatcher to format to output. Child
+    classes can implement formats like JSON or XML by implementing the
+    ``format`` method.
+    
+    API views can choose to return an instance of this class instead of
+    raw data, in order to pass along metadata like a status code or or
+    additional headers. For example, a REST api might want to return a HTTP
+    ``Location`` header for a newly posted resource:
+    
+    def post(request, name):
+        # ...
+        return APIResponse(None,
+            headers={'Location': reverse(view, args=[new_id])}
+            
+    See also ``APIError``, which has a partly similar interface.
     """
-    @classmethod
-    def make(self, data):
-        # if the data is an exception, we need to format it into a data object,
-        # while still preserving http status etc too => response object
-        if data is APIError:
-            data = data.to_response(data=self.format_error(data))
-
-        if data is APIResponse:
-            content = get_response(data.data)
+    def __init__(self, data, http_status=None, http_headers=None):
+        """
+        """
+        self.http_status = None
+        self.http_headers = None
+        
+        if isinstance(data, APIResponse):
+            self.data, self.status, self.headers = \
+                data.data, data.status, data.headers
         else:
-            content = get_response(data)
-
-        return HttpResponse(content=content)
+            self.data = data
+            
+        #elif isinstance(error):
+        #    take over meta data but not content # ???? or not?
+                
+        if http_status and self.http_status is None:
+            self.http_status = http_status
+        if http_headers and self.http_headers is None:
+            self.http_headers = http_headers
+    
+    def get_response(self):
+        """
+        Returns a Django ``HttpResponse`` for this instance. Child classes have
+        to implement ``format`` to modify the content of the response.
+        """
+        response = HttpResponse(self.format(self.data), status=self.status)
+        if self.headers:
+            for key, value in self.headers:
+                response[key] = value
+        return response
+        
+    def format(self, data):
+        """
+        Child classes need to provide this method to prepare ``data`` for use
+        as the content of a ``HttpResponse``. Should return a string.
+        
+        Usually, ``data`` is base python structure that needs to be serialized.
+        Although there are no precise requirements as to what datatypes need to
+        be supported, the set of basic JSON types is recommended. Note that
+        the ``data`` can also be ``None``, which should translate to an empty
+        response body in almost all cases.
+        
+        ``data`` can also be of be an exception (of type ``APIError``), in
+        which case it should be formatted as an error response.
+        """
+        raise NotImplementedError()
+    
+class PythonResponse(APIResponse):
+    """
+    Special response class that returns the native python objects, as
+    retrieved from the user's API views. Exceptions are re-raised.
+    """
+    def get_response(self):
+        if isinstance(self.data, APIError):
+            raise self.data
+        return self.data
 
 class JsonResponse(APIResponse):
-    def get_response(self, data):
-        return HttpResponse()
+    """
+    Serializes the response to JSON.
+    Based on:
+        http://www.djangosnippets.org/snippets/154/
+    """
+    def format(self, data):
+        if isinstance(data, QuerySet):
+            from django.core import serializers
+            content = serializers.serialize('json', data)
+        else:
+            from django.utils import simplejson
+            content = simplejson.dumps(data)
+        return HttpResponse(content, mimetype='application/json')
 
 class XmlRpcResponse(APIResponse):
-    def get_response(self, data):
+    def format(self, data):
         if isinstance(data, APIError):
             # convert to fault xmlrpc message
             pass
@@ -207,12 +320,13 @@ class Dispatcher(object):
     )
     """
 
+    # Child classes can specify this
     default_response_class = None
 
     # TODO: param: allow header auth
-    def __init__(self, api, response_class=None):
+    def __init__(self, api, response_class=default_response_class):
         self.api = api
-        self.response_class = response_class or self.default_response_class
+        self.response_class = response_class
 
     def __call__(self, *args, **kwargs):
         return self.dispatch(*args, **kwargs)
@@ -238,7 +352,7 @@ class Dispatcher(object):
         not arise.
 
         Should a problem occur that prevents from returning a meaningful result,
-        raise a BadRequestError.
+        raise a ``BadRequestError``.
         """
         raise NotImplementedError()
     del parse_request
@@ -246,29 +360,33 @@ class Dispatcher(object):
     def dispatch(self, request, url=None):
         """
         Resolves an incoming request to an API call, calls the method, and
-        returns it's result, converted via the response_class attribute, as a
-        Django Response object.
+        returns it's result, converted via the ``response_class`` attribute,
+        as a Django ``Response`` object.
 
-        request is a Django Request object. url is the sub-url of the
-        request to be resolved. If it is missing, request.path is used.
+        ``request`` is a Django ``Request`` object. ``url`` is the sub-url of
+        the request to be resolved. If it is missing, ``request.path`` is used.
         """
         if not hasattr(self, 'parse_request'):
             raise NotImplementedError()
 
         try:
-            # TODO: let the API class define error() handler methods
-            resolved = self.parse_request(request, url or request.path)
-            if isinstance(resolved, tuple): resolved = [resolved]
+            parsed = self.parse_request(request, url or request.path)
+            if isinstance(parsed, tuple): parsed = [parsed]
 
-            # try to resolve to a method call
+            # try to resolve to a method call by trying all the
+            # different options in order
             method = None
-            for path, args, kwargs in resolved:
+            for path, args, kwargs in parsed:
                 method = self.api.resolve(path)
                 if method: break;
             if method is None:
                 raise MethodNotFoundError()
-
-            # call the first method found
+            
+            if self.api._meta.check_key:
+                key = kwargs.pop(self.api._meta.key_argument, None) or \
+                    request and request.get(self.api._meta.key_header, None)
+                if not self.api._meta.check_key(request, key):
+                    raise BadRequestError()
             #if method.needs_key:
             #    if not self._api.check_key():
             #        raise KeyInvalid()
@@ -276,18 +394,49 @@ class Dispatcher(object):
             #    if not self._api.check_auth():
             #        raise AuthInvalid()
             # raises TypeError
-            result = method(request, *args, **kwargs)
-        # Catch our own errors only. everything else will bubble up to Django's
-        # exception handling. If you don't want that, you can always handle
-        # them in your custom dispatcher.
+
+            # call the first method found
+            try:
+                result = method(request, *args, **kwargs)
+            except TypeError, e:
+                raise BadRequestError()
+            
+        # Catch our own errors only. Everything else will bubble up to Django's
+        # exception handling. If you don't want that, you can always write a
+        # custom dispatcher and let it handle or preprocess the rest (e.g.
+        # convert all exceptions to ``APIError``s before passing them along).
         except APIError, e:
+            # TODO: let the API class define error() handler methods
             result = e
 
-        if not self.response_class:
-            # raise exception or return unmodified, or .data in APIResponse case
-            pass
-        else:
-            return self.response_class().get_response(result)
+        response_class = self.response_class
+        # if no response class is available (which usually means that the user
+        # as explicitly passed ``None``, as a dispatcher should provide a
+        # default response class, we return everything raw
+        if not response_class:
+            response_class = PythonResponse
+
+        return response_class(result).get_response()
+    
+class SimpleDispatcher(Dispatcher):
+    """
+    Dispatcher that resolves a path in dotted notation, mainly useful for
+    debugging. Note the different method signature of ``dispatch``, and that
+    ``request`` still needs to be passed in.
+    
+    Uses the free ``url`` argument of ``parse_request`` to pass along the
+    method name and arguments, as the ``Dispatcher`` base class is not really
+    designed for this kind of use, and doesn't provide a really good way to
+    handle any other incoming data besides the request. The best alternative
+    would probably be attaching custom attributes to ``request``, but it could
+    possibly be ``None`` as well.
+    """
+    def parse_request(self, request, data):
+        return (data['name'].split('.'), data['args'], data['kwargs'])
+        
+    def dispatch(self, name, request=None, *args, **kwargs):
+        data = {'name': name, 'args': args, 'kwargs': kwargs}
+        return super(SimpleDispatcher, self).dispatch(request, data)
 
 class JsonDispatcher(Dispatcher):
     """

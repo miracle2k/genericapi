@@ -5,7 +5,7 @@ def can_call(apicls, name, *args, **kwargs):
     expect = kwargs.pop('expect', True)
     assert apicls.execute(name, *args, **kwargs) == expect
 def cannot_call(apicls, name, *args, **kwargs):
-    raises(AttributeError, apicls.execute, name, *args, **kwargs)
+    raises(MethodNotFoundError, apicls.execute, name, *args, **kwargs)
 
 def test_class():
     """
@@ -31,22 +31,22 @@ def test_accessibility():
 
     class TestAPI(GenericAPI):
         @expose
-        def root(): return True
+        def root(r): return True
     
         class other(object):  # non-namespace
             @expose
-            def func1(): return True
+            def func1(r): return True
             @staticmethod
             @expose
-            def func2(): return True
+            def func2(r): return True
     
         class sub(Namespace):
             @expose
-            def exposed(): return True
-            def notexposed(): return True
+            def exposed(r): return True
+            def notexposed(r): return True
             @conceal
-            def concealed(): return True
-            def __private(): return True
+            def concealed(r): return True
+            def __private(r): return True
 
     # root-level methods
     can_call(TestAPI, 'root')
@@ -64,7 +64,7 @@ def test_accessibility():
     cannot_call(TestAPI, 'sub._sub__private')
 
     # exposed & concealed in "expose by default" mode
-    TestAPI.expose_by_default = True
+    TestAPI._meta.expose_by_default = True
     can_call(TestAPI, 'sub.exposed')
     can_call(TestAPI, 'sub.notexposed')
     cannot_call(TestAPI, 'sub.concealed')
@@ -81,15 +81,15 @@ def test_inheritance():
     """
     class TestAPI(GenericAPI):
         @expose
-        def root(): return True
+        def root(r): return True
         class sub(Namespace):
             @expose
-            def exposed(): return True
+            def exposed(r): return True
             @expose
-            def other(): return True
+            def other(r): return True
     class TestAPIEx(TestAPI):
         @expose
-        def subclass_method(): return True
+        def subclass_method(r): return True
         class subex(TestAPI.sub): pass
 
     # direct call to method in child class
@@ -105,14 +105,14 @@ def test_inheritance():
     class TestAPIEx2(TestAPI):
         class sub(TestAPI.sub):
             @expose
-            def exposed(): return 5
+            def exposed(r): return 5
     can_call(TestAPIEx2, 'sub.exposed', expect=5)
     # check that the same is true if a namespace just has the same name as one
     # in the super class, and does not directly inherit from it as well.
     class TestAPIEx3(TestAPI):
         class sub(Namespace):
             @expose
-            def exposed(): return 5
+            def exposed(r): return 5
     can_call(TestAPIEx3, 'sub.exposed', expect=5)
     
     # [bug] makes sure backtracking works while resolving methods. the child
@@ -125,7 +125,7 @@ def test_inheritance():
         class sub(Namespace):
             other = 'test'
             # is actually not exposed, but is in superclass!
-            def exposed(): return 10
+            def exposed(r): return 10
     can_call(TestAPIEx4, 'sub.other')
     can_call(TestAPIEx4, 'sub.exposed', expect=5)
     
@@ -135,10 +135,10 @@ def test_inheritance():
         def echo(text): return text
     class AnotherNamespace(Namespace):
         @expose
-        def call(): return True
+        def call(r): return True
     class TestAPIEx5(TestAPI, AnotherAPI, AnotherNamespace):
         @expose
-        def new(): return True
+        def new(r): return True
     can_call(TestAPIEx5, 'echo', 'foo', expect='foo')
     can_call(TestAPIEx5, 'call')
     can_call(TestAPIEx5, 'new')
@@ -147,13 +147,13 @@ def test_inheritance():
     # namespaces), but not super or child classes.
     class ApiA(GenericAPI):
         # expose_by_default defaults to False
-        def notexposed_a(): return True
+        def notexposed_a(r): return True
     class ApiB(ApiA):
-        expose_by_default = True
-        def notexposed_b(): return True
+        class Meta: expose_by_default = True
+        def notexposed_b(r): return True
     class ApiC(ApiB):
-        expose_by_default = False
-        def notexposed_c(): return True
+        class Meta: expose_by_default = False
+        def notexposed_c(r): return True
     cannot_call(ApiA, 'notexposed_a')
     can_call(ApiB, 'notexposed_b')
     cannot_call(ApiB, 'notexposed_a')
