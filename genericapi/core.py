@@ -74,28 +74,65 @@ class NamespaceOptions(object):
     Holds the options defined in a ``Meta`` subclass.
     """
     def __init__(self, options=None):
+        self.parent = None
         self.expose_by_default = getattr(options, 'expose_by_default', None)
         self.key_header = getattr(options, 'key_header', None)
         self.key_argument = getattr(options, 'key_argument', None)
-        self.check_key = getattr(options, 'check_key', None)
-        if self.check_key: self.check_key = self.check_key.im_func
+        check_key = getattr(options, 'check_key', None)
+        self.check_key = check_key and check_key.im_func or None
+    def __getattribute__(self, attr):
+        """
+        If a vale is ``None``, automatically fall back to the parent
+        namespace's options.
+        """
+        val = super(NamespaceOptions, self).__getattribute__(attr)
+        parent = super(NamespaceOptions, self).__getattribute__('parent')
+        if val is None and parent:
+            return getattr(parent._meta, attr)
+        return val
+
+class Namespace(object):
+    """
+    Forward define an identifer called ``Namespace``. This is necessary because
+    we need to reference ``Namespace`` within it's own metaclass. For child
+    classes the user defines this is no problem, but for the base ``Namespace``
+    class itself the metaclass code runs as well (before the class is defined).
+
+    Of course, this and the real ``Namespace`` class are different, but that's
+    ok: The code in question wouldn't have any effect for the base
+    ``Namespace`` class anyway.
+    """
+    pass
 
 class NamespaceMetaclass(type):
     """
-    Makes all methods of the class static, and converts the ``Meta`` subclass
-    to an attribute.
+    Makes all methods of the class static, converts the ``Meta`` subclass
+    to a NamespaceOptions instance, and some other things.
     """
     def __new__(cls, name, bases, attrs):
         opts = NamespaceOptions(attrs.pop('Meta', None))
         attrs['_meta'] = opts
         
+        def is_func_attr(a):
+            return isinstance(attrs[a], types.FunctionType) and \
+                   not a in ['__new__']
+        # convert all functions to static ``apimethod``s.
         for a in attrs:
-            if (isinstance(attrs[a], types.FunctionType) and not a in ['__new__']):
-                attrs[a] = apimethod(attrs[a])
-                # add a reference to the namespaces options
-                attrs[a]._meta = opts
+            if is_func_attr(a): attrs[a] = apimethod(attrs[a])
 
-        return type.__new__(cls, name, bases, attrs)
+        # create the namespace
+        self = type.__new__(cls, name, bases, attrs)
+    
+        # pre-process: add references to this newly created namespaces to all
+        # sub-namespaces and methods.
+        for a in attrs:
+            attr = getattr(self, a)
+            if is_func_attr(a): attr._namespace = self
+            # this is the code that requires the ``Namespace`` forward decl
+            elif isinstance(attr, type) and issubclass(attr, Namespace):
+                attr._meta.parent = self
+                
+        return self
 
 class Namespace(object):
     from django.newforms import ModelForm
@@ -149,7 +186,7 @@ class GenericAPI(Namespace):
         None if the path could not be resolved, or the method targeted is not
         exposed.
         """
-        def _find(obj, index=0, parent_default_expose=None):
+        def _find(obj, index=0):
             name = path[index]
 
             # only look in namespaces
@@ -162,19 +199,9 @@ class GenericAPI(Namespace):
             # all it's super classes, recursively.
             for obj in obj.__mro__:
                 if name in obj.__dict__:
-                    # expose_by_default is a bit though. We don't want it to
-                    # work through classic inheritance (i.e. each class has
-                    # it's own value), but namespaces should inherit the value
-                    # from their parents. So we drag the value from the current
-                    # object with us while handling the childs, and use it
-                    # when an object does not define the attribute itself.
-                    expose_by_default = obj._meta.expose_by_default
-                    if expose_by_default is None:
-                        expose_by_default = parent_default_expose
-
                     # if we don't have resolved the complete path yet, continue
                     if index < len(path)-1:
-                        attr = _find(obj.__dict__[name], index+1, expose_by_default)
+                        attr = _find(obj.__dict__[name], index+1)
                         # if we found something, return it, otherwise continue
                         if attr: return attr
 
@@ -184,7 +211,7 @@ class GenericAPI(Namespace):
                     else:
                         method = obj.__dict__[name]
                         if isinstance(method, apimethod):
-                            if getattr(method, 'exposed', expose_by_default):
+                            if getattr(method, 'exposed', obj._meta.expose_by_default):
                                 return method
             # backtrack
             return None
