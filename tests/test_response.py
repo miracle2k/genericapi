@@ -83,3 +83,6 @@ def test_json_response():
     # check exception are formatted to valid json as well
     from django.utils import simplejson
     simplejson.loads(format(APIError('An error occured', code=2)))
+    
+    # check return mime type
+    JsonResponse({}).get_response().mime_type = 'application/json'

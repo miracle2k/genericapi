@@ -1,6 +1,5 @@
 # encoding: utf-8
 import types, re
-
 from django.http import HttpResponse
 
 # TODO: implement signature enforcing (includes types, "int" etc).
@@ -11,9 +10,7 @@ from django.http import HttpResponse
 
 __all__ = (
     'expose', 'conceal', 'check_key', 'process_call',
-    'Namespace', 'GenericAPI',
-    'JsonDispatcher',
-    'APIResponse', 'PythonResponse', 'JsonResponse',
+    'Namespace', 'GenericAPI', 'Dispatcher', 'APIResponse',
     'APIError', 'BadRequestError', 'MethodNotFoundError', 'InvalidKeyError',
 )
 
@@ -289,27 +286,29 @@ class GenericAPI(Namespace):
         """
         response_class = kwargs.pop('response_class', None)
         request = kwargs.pop('request', None)
+        from dispatch import SimpleDispatcher
         return SimpleDispatcher(self, response_class).dispatch(
             method, request, *args, **kwargs)
-
+            
 class APIResponse(object):
     """
     An "API response" is used by the depatcher to format to output. Child
     classes can implement formats like JSON or XML by implementing the
     ``format`` method.
-    
+
     API views can choose to return an instance of this class instead of
     raw data, in order to pass along metadata like a status code or or
     additional headers. For example, a REST api might want to return a HTTP
     ``Location`` header for a newly posted resource:
-    
+
     def post(request, name):
         # ...
         return APIResponse(None,
             headers={'Location': reverse(view, args=[new_id])}
-            
+
     See also ``APIError``, which has a partly similar interface.
     """
+    # TODO: rename to ``Response``?
     def __init__(self, data, http_status=None, http_headers=None):
         # If another response object is passed, clone it; this allows the
         # dispatcher code to handle ``APIResponse`` objects from a view like
@@ -326,12 +325,12 @@ class APIResponse(object):
         # Otherwise, just use the parameters passed.
         else:
             self.data, self.http_status, self.http_headers = data, None, None
-            
+
         # the metadata passed directly to us always overwrites what might have
         # been copied from ``data``.
         if http_status is not None: self.http_status = http_status
         if http_headers is not None: self.http_headers = http_headers
-    
+
     def get_response(self):
         """
         Returns a Django ``HttpResponse`` for this instance. Child classes have
@@ -342,62 +341,23 @@ class APIResponse(object):
             for key, value in self.http_headers.items():
                 response[key] = value
         return response
-        
+
     def format(self, data):
         """
         Child classes need to provide this method to prepare ``data`` for use
         as the content of a ``HttpResponse``. Should return a string.
-        
+
         Usually, ``data`` is base python structure that needs to be serialized.
         Although there are no precise requirements as to what datatypes need to
         be supported, the set of basic JSON types is recommended. Note that
         the ``data`` can also be ``None``, which should translate to an empty
         response body in almost all cases.
-        
+
         ``data`` can also be of be an exception (of type ``APIError``), in
         which case it should be formatted as an error response.
         """
         raise NotImplementedError()
-    
-class PythonResponse(APIResponse):
-    """
-    Special response class that returns the native python objects, as
-    retrieved from the user's API views. Exceptions are re-raised.
-    """
-    def get_response(self):
-        if isinstance(self.data, Exception):
-            raise self.data
-        return self.data
-
-class JsonResponse(APIResponse):
-    """
-    Serializes the response to JSON.
-    Based on:
-        http://www.djangosnippets.org/snippets/154/
-    """
-    def format(self, data):
-        from django.db.models.query import QuerySet
-        from django.utils import simplejson
-        if data is None:
-            content = ''
-        elif isinstance(data, QuerySet):
-            from django.core import serializers
-            content = serializers.serialize('json', data)
-        elif isinstance(data, APIError):
-            content = simplejson.dumps(data.data)
-        else:
-            content = simplejson.dumps(data)
-        return HttpResponse(content, mimetype='application/json')
-
-class XmlRpcResponse(APIResponse):
-    def format(self, data):
-        if isinstance(data, APIError):
-            # convert to fault xmlrpc message
-            pass
-        else:
-            # convert standard
-            pass
-
+            
 class Dispatcher(object):
     """
     Dispatcher base class. Dispatchers are responsible for resolving an
@@ -474,10 +434,10 @@ class Dispatcher(object):
                 if method: break;
             if method is None:
                 raise MethodNotFoundError()
-            
+
             # helper that returns the first "not None" item of a sequence
             first = lambda *a: filter(lambda x: x is not None, a)[0]
-            
+
             # validate api key: first, check if we we need to require a key at
             # all, and if so, what the function doing the validation is. if
             # there is no method-specific validator, try the one from the
@@ -493,7 +453,7 @@ class Dispatcher(object):
                       request and request.META.get(first(meta.key_header, 'X-APIKEY'))
                 if not check_key(request, key):
                     raise InvalidKeyError()
-                
+
             # handle pre-processing
             process_call = getattr(method, 'process_call', None)
             if process_call is None:
@@ -523,7 +483,7 @@ class Dispatcher(object):
                 result = method(request, *args, **kwargs)
             except TypeError, e:
                 raise BadRequestError()
-            
+
         # Catch our own errors only. Everything else will bubble up to Django's
         # exception handling. If you don't want that, you can always write a
         # custom dispatcher and let it handle or preprocess the rest (e.g.
@@ -542,154 +502,7 @@ class Dispatcher(object):
         # as explicitly passed ``None``, as dispatcher should provide a
         # default response class, then we return everything raw
         if not response_class:
+            from response import PythonResponse
             response_class = PythonResponse
 
         return response_class(result).get_response()
-    
-class SimpleDispatcher(Dispatcher):
-    """
-    Dispatcher that resolves a path in dotted notation, mainly useful for
-    debugging. Note the different method signature of ``dispatch``, and that
-    ``request`` still needs to be passed in.
-    
-    Uses the free ``url`` argument of ``parse_request`` to pass along the
-    method name and arguments, as the ``Dispatcher`` base class is not really
-    designed for this kind of use, and doesn't provide a really good way to
-    handle any other incoming data besides the request. The best alternative
-    would probably be attaching custom attributes to ``request``, but it could
-    possibly be ``None`` as well.
-    """
-    def parse_request(self, request, data):
-        return (data['name'].split('.'), data['args'], data['kwargs'])
-        
-    def dispatch(self, name, request=None, *args, **kwargs):
-        data = {'name': name, 'args': args, 'kwargs': kwargs}
-        return super(SimpleDispatcher, self).dispatch(request, data)
-
-class JsonDispatcher(Dispatcher):
-    """
-    Reads the method name from the URL, using '/' as a namespace separator.
-    Arguments are passed via the querystring, and as such, only keyword
-    arguments are supported. The exception is one (!) positional argument that
-    can be appended to the url. All arguments are expected to be formatted in
-    json. Ignores any POST payload.
-
-    GET /test
-    ==> api.test()
-
-    GET /echo/["hello world"]
-    ==> api.test(["hello world"])
-
-    GET /comments/add/"great post"/?moderation=true&author=null
-    ==> api.comments.add("great post!", moderation=True, author=None)
-    """
-    default_response_class = JsonResponse
-    # TODO: allow simple strings option
-    # TODO: allow GET params option
-
-    ident_regex = re.compile('^[_a-zA-Z][_a-zA-Z0-9]*$')
-
-    def __parse(self, request, path, argstr):
-        from django.utils import simplejson
-
-        # convert the positional argument from json to python
-        if argstr:
-            try: args = [simplejson.loads(argstr)]
-            except ValueError, e: raise BadRequestError(e)
-        else:
-            args = []
-
-        # convert json query strings into kwargs array
-        kwargs = {}
-        for key, value in request.GET.items():
-            kwargs[str(key)] = simplejson.loads(value)
-        return path, args, kwargs
-
-    def parse_request(self, request, url):
-        # Split the path and remove empty items
-        path = filter(None, url.split('/'))
-        if path:
-            # Unless their are at least two items in path, there can not be any
-            # arguments at all.
-            if len(path) < 2:
-                return self.__parse(request, path, '')
-            # If the last item is not an identifier, it must either be the
-            # argument portion, or an invalid call. We just assume the former.
-            # Note that there is no danger for the wrong function being
-            # accidently called because of this, as the previous identier in
-            # the path would have to be a namespace, and the call would fail
-            # anyway (albeit due to a different reason).
-            #
-            #   /namespace/call,  (=> accidental ",", considered an argument)
-            #   => error would be"namespace cannot be called" instead of
-            #      "namespace.call does not exist".
-            elif not self.ident_regex.match(path[-1]):
-                return self.__parse(request, path[:-1], path[-1])
-            # Otherwise, we can't say for sure if the last part is an attribute
-            # or not, so we try to return both options. This is ok for the same
-            # reasons outlined above: it cannot lead to the wrong call.
-            else:
-                # if an error is raised at this point for the argument option,
-                # then we already know it can't work out, and leave it off.
-                try: option1 = self.__parse(request, path[:-1], path[-1])
-                except BadRequestError: option1 = None
-                return (option1 and [option1] or []) + [(path, [], {})]
-
-class RestDispatcher(Dispatcher):
-    """
-    Works like the JsonDispatcher with respect to arguments, but tries to
-    push you towards restful api design by appending the HTTP method used to
-    the method path.
-    # TODO: what about http status code returns
-    # TODO: different payload parsers (xml, json, ...)
-
-    GET /comments/1
-    ==> api.comments.get(1)
-
-    DELETE /comments/1
-    ==> api.comments.delete(1)
-
-    PUT /comments/1
-    {sdfsdf}
-    ==> api.comments.put(1,payload=[])
-
-    POST /comments/
-    {sdfsdf}
-    ==> api.comments.post(payload=[])
-
-    Additional arguments can be used as well:
-
-    GET /comments/1,full=true
-    POST /comments/mark_as_spam=true
-
-    If you want to provide your API both in REST and other formats, check out
-    the @verb decorator.
-    """
-
-    default_response_class = JsonResponse
-
-    def parse_url(self, request):
-        pass
-
-class XmlRpcDispatcher(Dispatcher):
-    """
-    Accepts the regular XML-RPC method call via POST. Fails on GET, or if
-    called with a (sub-)url. Uses a dot  "." for separating namespaces.
-
-    POST /
-    <?xml version="1.0"?>
-    <methodCall>
-      <methodName>comments.add</methodName>
-      <params>
-        <param><value><string>great post!</string></value></param>
-      </params>
-    </methodCall>
-    ==> api.comments.add("great post!")
-
-    Note that keyword arguments are not supported.
-    """
-
-    default_response_class = XmlRpcResponse
-
-    def parse_url(self, request):
-        pass
