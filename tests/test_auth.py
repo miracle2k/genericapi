@@ -1,3 +1,7 @@
+"""
+Test authentication hooks.
+"""
+
 from django.http import HttpRequest, QueryDict
 from shared import *
 

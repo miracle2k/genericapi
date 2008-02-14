@@ -132,7 +132,7 @@ def test_inheritance():
     # simple multi-inheritance checks
     class AnotherAPI(GenericAPI):
         @expose
-        def echo(text): return text
+        def echo(r, text): return text
     class AnotherNamespace(Namespace):
         @expose
         def call(r): return True

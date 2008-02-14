@@ -3,21 +3,17 @@ Test the various response formats.
 """
 
 from shared import *
-from genericapi.core import Dispatcher
-
-class SampleAPI(GenericAPI):
-    class Meta:
-        expose_by_default = True
-        def format_error(request, error):
-            return {'error': True}
-
-    def fail(request):
-        raise APIError('you requested an error.')
 
 def test_common():
     """
     Common response stuff.
     """
+    
+    # Ensure that the http options are carried through to the actual response
+    r = JsonResponse('data', http_status=404,
+                    http_headers={'X-Custom': 'test'}).get_response()
+    assert r.status_code == 404
+    assert r['X-Custom'] == 'test'
 
     # Try to create ``APIResponse`` classes with various data types and options
     APIResponse('')

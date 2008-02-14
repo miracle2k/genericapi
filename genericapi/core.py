@@ -95,8 +95,8 @@ class APIError(Exception):
         Provides the default formatting for exceptions; Unless overriden by the
         user, this function determines how an exception is serialized.
         """
-        value = getattr(self.__dict__, 'data', None)
-        if not value:
+        value = self.__dict__.get('data', None)
+        if value is None:
             value = {'error': self.message or True}
             if self.code: value['code'] = self.code
         return value
@@ -140,6 +140,8 @@ class NamespaceOptions(object):
         self.check_key = check_key and check_key.im_func or check_key
         process_call = getattr(options, 'process_call', None)
         self.process_call = process_call and process_call.im_func or process_call
+        format_error = getattr(options, 'format_error', None)
+        self.format_error = format_error and format_error.im_func or format_error
     def __getattribute__(self, attr):
         """
         If a value is ``None``, automatically fall back to the parent
@@ -279,13 +281,16 @@ class GenericAPI(Namespace):
         return _find(self)
 
     @classmethod
-    def execute(self, method, request=None, *args, **kwargs):
+    def execute(self, method, *args, **kwargs):
         """
         Mini-dispatcher that executes a method by it's name specified in
         dotted notation. If ``request`` is not passed in, ``None`` is used
         automatically, but this might break your views, of course.
         """
-        return SimpleDispatcher(self, None).dispatch(method, request, *args, **kwargs)
+        response_class = kwargs.pop('response_class', None)
+        request = kwargs.pop('request', None)
+        return SimpleDispatcher(self, response_class).dispatch(
+            method, request, *args, **kwargs)
 
 class APIResponse(object):
     """
@@ -334,7 +339,7 @@ class APIResponse(object):
         """
         response = HttpResponse(self.format(self.data), status=self.http_status)
         if self.http_headers:
-            for key, value in self.http_headers:
+            for key, value in self.http_headers.items():
                 response[key] = value
         return response
         
@@ -419,22 +424,13 @@ class Dispatcher(object):
     # TODO: Do we want to support allowing/disallow authenticiation (key and
     # other) via headers or arguments. It's currently configured via the Meta
     # subclasses of an API, which is pretty flexible, but logicially it might
-    # belong on the dispatcher level?
+    # belong at the dispatcher level?
     def __init__(self, api, response_class=default_response_class):
         self.api = api
         self.response_class = response_class
 
     def __call__(self, *args, **kwargs):
         return self.dispatch(*args, **kwargs)
-
-    def format_error(self, error):
-        """
-        Convert the exception in error into a data object. as there is no "one
-        way" to do this, we let the user handle it via a special function
-        defined in the API class. The base class provides a default
-        implementation, so this is optional.
-        """
-        pass
 
     def parse_request(self, request, url):
         """
@@ -465,6 +461,7 @@ class Dispatcher(object):
         if not hasattr(self, 'parse_request'):
             raise NotImplementedError()
 
+        method = None
         try:
             parsed = self.parse_request(request, url or request.path)
             if isinstance(parsed, tuple): parsed = [parsed]
@@ -532,13 +529,18 @@ class Dispatcher(object):
         # custom dispatcher and let it handle or preprocess the rest (e.g.
         # convert all exceptions to ``APIError``s before passing them along).
         except APIError, e:
-            # TODO: let the API class define error() handler methods
+            # try to find a custom error formatting function
+            meta = method and method._namespace._meta or self.api._meta
+            if meta.format_error:
+                e.data = meta.format_error(request, e)
+            # use the exception as the data object; response classes need to
+            # be able to handle that.
             result = e
 
         response_class = self.response_class
         # if no response class is available (which usually means that the user
-        # as explicitly passed ``None``, as a dispatcher should provide a
-        # default response class, we return everything raw
+        # as explicitly passed ``None``, as dispatcher should provide a
+        # default response class, then we return everything raw
         if not response_class:
             response_class = PythonResponse
 

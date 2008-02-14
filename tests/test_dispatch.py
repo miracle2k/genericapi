@@ -23,13 +23,24 @@ class SampleAPI(GenericAPI):
         def give_me_false(request): return False
 
 def test_common():
-    """Common dispatcher stuff"""
+    """
+    Common dispatcher stuff.
+    """
     request = make_request('/')
     # make sure using the base Dispatcher class fails properly
     raises(NotImplementedError, Dispatcher(SampleAPI), request)
+    
+    # [bug] excute debug dispatcher requires the ``request`` parameter to
+    # be passed explicitely as a keyword; otherwise, we would have to use
+    # type checking the first argument to determine whether or not a request
+    # is meant to be included in the call.
+    raises(BadRequestError, SampleAPI.execute, 'echo', 'not a request', 'text')
 
 def test_json_dispatch():
-    # note we are not using a response class. ``JSONResponse``
+    """
+    Test JSON dispatcher.
+    """
+    # Note we are not using a response class. ``JSONResponse``
     # is tested separately.
     dispatcher = JsonDispatcher(SampleAPI, response_class=None)
 
@@ -74,7 +85,6 @@ def test_json_dispatch():
     assert dispatcher(make_request('/echo/-1')) == -1
     assert dispatcher(make_request('/echo/[1,2,3,4]')) == [1,2,3,4]
     assert dispatcher(make_request('/echo/{"a": 1, "b": 2}')) == {'a': 1, 'b': 2}
-
 
 def test_rest_dispatch():
     pass
