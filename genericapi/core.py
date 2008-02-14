@@ -13,7 +13,8 @@ __all__ = (
     'expose', 'conceal', 'check_key', 'process_call',
     'Namespace', 'GenericAPI',
     'JsonDispatcher',
-    'BadRequestError', 'MethodNotFoundError', 'InvalidKeyError',
+    'APIResponse', 'PythonResponse', 'JsonResponse',
+    'APIError', 'BadRequestError', 'MethodNotFoundError', 'InvalidKeyError',
 )
 
 def expose(func):
@@ -88,6 +89,21 @@ class APIError(Exception):
     def __init__(self, message="", code=None, http_status=None, http_headers=None):
         self.message, self.code = message, code
         self.http_status, self.http_headers = http_status, http_headers
+        
+    def _get_data(self):
+        """
+        Provides the default formatting for exceptions; Unless overriden by the
+        user, this function determines how an exception is serialized.
+        """
+        value = getattr(self.__dict__, 'data', None)
+        if not value:
+            value = {'error': self.message or True}
+            if self.code: value['code'] = self.code
+        return value
+    def _set_data(self, value):
+        self.__dict__['data'] = value
+    data = property(_get_data, _set_data)
+    
 class MethodNotFoundError(APIError): pass
 class InvalidKeyError(APIError): pass
 class BadRequestError(APIError): pass
@@ -290,33 +306,35 @@ class APIResponse(object):
     See also ``APIError``, which has a partly similar interface.
     """
     def __init__(self, data, http_status=None, http_headers=None):
-        """
-        """
-        self.http_status = None
-        self.http_headers = None
-        
+        # If another response object is passed, clone it; this allows the
+        # dispatcher code to handle ``APIResponse`` objects from a view like
+        # any other data type.
         if isinstance(data, APIResponse):
-            self.data, self.status, self.headers = \
-                data.data, data.status, data.headers
+            self.data, self.http_status, self.http_headers = \
+                data.data, data.http_status, data.http_headers
+        # Same goes for errors, which are basically response objects in
+        # exception form; we copy the http metadata, however keep the exception
+        # instance itself as the data, so it can be identified as an error.
+        elif isinstance(data, APIError):
+            self.data, self.http_status, self.http_headers = \
+                data, data.http_status, data.http_headers
+        # Otherwise, just use the parameters passed.
         else:
-            self.data = data
+            self.data, self.http_status, self.http_headers = data, None, None
             
-        #elif isinstance(error):
-        #    take over meta data but not content # ???? or not?
-                
-        if http_status and self.http_status is None:
-            self.http_status = http_status
-        if http_headers and self.http_headers is None:
-            self.http_headers = http_headers
+        # the metadata passed directly to us always overwrites what might have
+        # been copied from ``data``.
+        if http_status is not None: self.http_status = http_status
+        if http_headers is not None: self.http_headers = http_headers
     
     def get_response(self):
         """
         Returns a Django ``HttpResponse`` for this instance. Child classes have
         to implement ``format`` to modify the content of the response.
         """
-        response = HttpResponse(self.format(self.data), status=self.status)
-        if self.headers:
-            for key, value in self.headers:
+        response = HttpResponse(self.format(self.data), status=self.http_status)
+        if self.http_headers:
+            for key, value in self.http_headers:
                 response[key] = value
         return response
         
@@ -342,7 +360,7 @@ class PythonResponse(APIResponse):
     retrieved from the user's API views. Exceptions are re-raised.
     """
     def get_response(self):
-        if isinstance(self.data, APIError):
+        if isinstance(self.data, Exception):
             raise self.data
         return self.data
 
@@ -353,11 +371,16 @@ class JsonResponse(APIResponse):
         http://www.djangosnippets.org/snippets/154/
     """
     def format(self, data):
-        if isinstance(data, QuerySet):
+        from django.db.models.query import QuerySet
+        from django.utils import simplejson
+        if data is None:
+            content = ''
+        elif isinstance(data, QuerySet):
             from django.core import serializers
             content = serializers.serialize('json', data)
+        elif isinstance(data, APIError):
+            content = simplejson.dumps(data.data)
         else:
-            from django.utils import simplejson
             content = simplejson.dumps(data)
         return HttpResponse(content, mimetype='application/json')
 
