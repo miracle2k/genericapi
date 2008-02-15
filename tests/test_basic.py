@@ -15,6 +15,7 @@ def test_class():
     # non-namespace subclasses are untouched, it's methods not made static and
     # they can be instantiated.
     class TestAPI(GenericAPI):
+        class Meta: pass
         class SortedDict(dict):
             def sort(self): self.items()
         class test(Namespace): pass
@@ -25,6 +26,9 @@ def test_class():
     
     # [bug] make sure we keep the correct name
     TestAPI.test.__name__ = 'test'
+    
+    # the ``Meta`` class is not removed, and still accessible as an attribute
+    TestAPI.Meta
 
 def test_accessibility():
     """Make sure we can and cannot access the right functions."""

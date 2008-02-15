@@ -3,7 +3,7 @@ from core import Dispatcher, BadRequestError
 from response import *
 
 __all__ = (
-    'SimpleDispatcher', 'JsonDispatcher',
+    'SimpleDispatcher', 'JsonDispatcher', 'RestDispatcher',
 )
 
 class SimpleDispatcher(Dispatcher):
@@ -49,23 +49,29 @@ class JsonDispatcher(Dispatcher):
 
     ident_regex = re.compile('^[_a-zA-Z][_a-zA-Z0-9]*$')
 
-    def __parse(self, request, path, argstr):
+    def __parse(self, request, path, argstr=None):
         from django.utils import simplejson
 
         # convert the positional argument from json to python
         if argstr:
             try: args = [simplejson.loads(argstr)]
-            except ValueError, e: raise BadRequestError(e)
+            except ValueError, e: raise BadRequestError()
         else:
             args = []
 
         # convert json query strings into kwargs array
         kwargs = {}
         for key, value in request.GET.items():
-            kwargs[str(key)] = simplejson.loads(value)
-        return path, args, kwargs
+            try: kwargs[str(key)] = simplejson.loads(value)
+            except ValueError, e: raise BadRequestError()
+        return [(path, args, kwargs,)]
 
     def parse_request(self, request, url):
+        """
+        Although we not have two we always return a list (of call-data
+        tuples) - even if there is only one option. This makes it easier for
+        the ``RestDispatcher`` class that uses us as a base.
+        """
         # Split the path and remove empty items
         path = filter(None, url.split('/'))
         if path:
@@ -93,15 +99,13 @@ class JsonDispatcher(Dispatcher):
                 # then we already know it can't work out, and leave it off.
                 try: option1 = self.__parse(request, path[:-1], path[-1])
                 except BadRequestError: option1 = None
-                return (option1 and [option1] or []) + [(path, [], {})]
+                return (option1 or []) + self.__parse(request, path[:])
 
-class RestDispatcher(Dispatcher):
+class RestDispatcher(JsonDispatcher):
     """
     Works like the JsonDispatcher with respect to arguments, but tries to
     push you towards restful api design by appending the HTTP method used to
-    the method path.
-    # TODO: what about http status code returns
-    # TODO: different payload parsers (xml, json, ...)
+    the call path.
 
     GET /comments/1
     ==> api.comments.get(1)
@@ -110,23 +114,35 @@ class RestDispatcher(Dispatcher):
     ==> api.comments.delete(1)
 
     PUT /comments/1
-    {sdfsdf}
+    {"text"}
     ==> api.comments.put(1,payload=[])
 
     POST /comments/
-    {sdfsdf}
+    {"text"}
     ==> api.comments.post(payload=[])
 
     Additional arguments can be used as well:
 
-    GET /comments/1,full=true
-    POST /comments/mark_as_spam=true
-
-    If you want to provide your API both in REST and other formats, check out
-    the @verb decorator.
+    GET /comments/1?full=true
+    POST /comments/?mark_as_spam=true
+    
+    Ultimately, this means that you won't be able to call any method that does
+    not end in get, post, put, or delete. If you want to offer a rest api in
+    conjunction with other formats, you can create a separate child class for
+    the rest dispatcher that implements the rest http methods as wrappers. That
+    way, neither format will provide access the each others version of the API.
     """
+    # TODO: support different payload parsers (xml, json, ...)
 
-    default_response_class = JsonResponse
-
-    def parse_url(self, request):
-        pass
+    def parse_request(self, request, url):
+        options = super(RestDispatcher, self).parse_request(request, url)
+        new_options = []
+        for path, args, kwargs in options:
+            # append http method to path
+            path.append(request.method.lower())
+            #  add post as payload
+            if request.POST:
+                kwargs['payload'] = request.POST
+                
+            new_options.append((path, args, kwargs,))
+        return new_options

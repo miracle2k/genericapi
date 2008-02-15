@@ -3,11 +3,13 @@ from shared import *
 from genericapi.core import Dispatcher
 from django.http import HttpRequest, QueryDict
 
-def make_request(url):
+def make_request(url, method=None, post=None):
     r = HttpRequest()
     url = urlparse(url)
     r.GET = QueryDict(url.query)
     r.path = url.path
+    if method: r.method = method
+    if post: r.POST.update(post)
     return r
 
 class SampleAPI(GenericAPI):
@@ -21,6 +23,13 @@ class SampleAPI(GenericAPI):
     def echo(request, val): return val
     class ns(Namespace):
         def give_me_false(request): return False
+        def with_param(request, param): return param
+    class rest(Namespace):
+        class resource(Namespace):
+            def get(request, id): return True
+            def delete(request, id): return True
+            def post(request, payload): return True
+            def put(request, id, payload): return True
 
 def test_common():
     """
@@ -35,6 +44,13 @@ def test_common():
     # type checking the first argument to determine whether or not a request
     # is meant to be included in the call.
     raises(BadRequestError, SampleAPI.execute, 'echo', 'not a request', 'text')
+    
+    # [bug] check handling of the "response_class" argument; ``False`` disables
+    # it, and ``None`` (or argument missing) falls back to the default, if any.
+    assert JsonDispatcher(None, response_class=False).response_class == False
+    assert Dispatcher(None, response_class=None).response_class is None
+    assert JsonDispatcher(None, response_class=None).response_class is not None
+    assert JsonDispatcher(None).response_class is not None
 
 def test_json_dispatch():
     """
@@ -42,7 +58,7 @@ def test_json_dispatch():
     """
     # Note we are not using a response class. ``JSONResponse``
     # is tested separately.
-    dispatcher = JsonDispatcher(SampleAPI, response_class=None)
+    dispatcher = JsonDispatcher(SampleAPI, response_class=False)
 
     # simple, argument-less calls
     assert dispatcher(make_request('/give_me_true')) == True
@@ -63,9 +79,14 @@ def test_json_dispatch():
     assert dispatcher(make_request('/add/?a=1&b=5')) == 6
     assert dispatcher(make_request('/make_dict/?a="b"&b="c"&c="a"')) == \
                                                 {'a': 'b', 'b': 'c', 'c': 'a'}
+    # [bug] make sure positional as well as keyword arguments work sublevels
+    assert dispatcher(make_request('/ns/with_param/5')) == 5
+    assert dispatcher(make_request('/ns/with_param/?param=5')) == 5
     # invalid keyword arguments
     raises(BadRequestError, "dispatcher(make_request('/add/?a=1'))")
     raises(BadRequestError, "dispatcher(make_request('/add/?a=1&b=2&c=1'))")
+    # [bug] invalid json raises a BadRequestError (and not say, a ValueError)
+    raises(BadRequestError, "dispatcher(make_request('/negate_bool/?d={['))")
 
     # mixed positional and keyword arguments
     assert dispatcher(make_request('/add/3?b=4')) == 7
@@ -75,7 +96,7 @@ def test_json_dispatch():
     # TODO
 
     # previous tests already touch on this, but do it more thorough: check
-    # various json type conversions.
+    # various json type conversions
     assert dispatcher(make_request('/echo/false')) == False
     assert dispatcher(make_request('/echo/true')) == True
     assert dispatcher(make_request('/echo/null')) == None
@@ -87,7 +108,17 @@ def test_json_dispatch():
     assert dispatcher(make_request('/echo/{"a": 1, "b": 2}')) == {'a': 1, 'b': 2}
 
 def test_rest_dispatch():
-    pass
+    """
+    Test rest dispatcher.
+    """
+    # note that we are not using a response class
+    dispatcher = RestDispatcher(SampleAPI, response_class=False)
+    
+    # test the various http methods
+    assert dispatcher(make_request('/rest/resource/1', 'GET')) == True
+    assert dispatcher(make_request('/rest/resource/1', 'DELETE')) == True
+    assert dispatcher(make_request('/rest/resource/1', 'PUT', {'v': 1})) == True
+    assert dispatcher(make_request('/rest/resource/', 'POST', {'v': 1})) == True
 
 def test_xmlrpc_dispatch():
     pass

@@ -7,7 +7,7 @@ from shared import *
 
 def make_request(key, value):
     r = HttpRequest()
-    r.META[key] = value
+    r.META['HTTP_'+key] = value
     return r
 
 class SampleAPI(GenericAPI):
@@ -53,6 +53,8 @@ def test_key_auth():
     """
     Test the API key system.
     """
+    
+    # TODO: test custom error raise in check_key
     
     # root level, valid key
     assert SampleAPI.execute('test', apikey="123") == True

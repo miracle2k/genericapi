@@ -2,11 +2,14 @@
 import types, re
 from django.http import HttpResponse
 
+# TODO: how to handle 404 errors, get_object_or_404() ...
 # TODO: implement signature enforcing (includes types, "int" etc).
+# TODO: case-sensitivity options
 # TODO: support namespaces that "consume" an element of the path
 # TODO: support JSONP callbacks
 # TODO: support per_method dispatching: api views are hooked manually into
 # urlconf, the dispatcher only resolves parameters.
+# TODO: introspection tools (e.g. list all methods...)
 
 __all__ = (
     'expose', 'conceal', 'check_key', 'process_call',
@@ -83,8 +86,11 @@ class APIError(Exception):
 
     Views can also return Exception instances instead of raising them.
     """
-    def __init__(self, message="", code=None, http_status=None, http_headers=None):
-        self.message, self.code = message, code
+    message = ""
+    def __init__(self, message=None, code=None,
+                 http_status=None, http_headers=None):
+        if message: self.message = message
+        self.code = code
         self.http_status, self.http_headers = http_status, http_headers
         
     def _get_data(self):
@@ -101,9 +107,17 @@ class APIError(Exception):
         self.__dict__['data'] = value
     data = property(_get_data, _set_data)
     
-class MethodNotFoundError(APIError): pass
-class InvalidKeyError(APIError): pass
-class BadRequestError(APIError): pass
+class MethodNotFoundError(APIError):
+    def __init__(self, *args, **kwargs):
+        self.message = 'Method Not Found'
+        self.method = kwargs.pop('method', None)
+        if self.method:
+            self.message += ': %s'%'.'.join(self.method)
+        super(MethodNotFoundError, self).__init__(*args, **kwargs)
+class InvalidKeyError(APIError):
+    message = 'Invalid API Key'
+class BadRequestError(APIError):
+    message = 'Bad Request'
 
 class apimethod(object):
     """
@@ -167,12 +181,18 @@ class NamespaceMetaclass(type):
     """
     Makes all methods of the class static, converts the ``Meta`` subclass
     to a NamespaceOptions instance, and some other things.
+    
+    # TODO: If the namespace has a super class, automatically make it's options
+    class a child class of the parent's options? This might make sense if
+    one GenericAPI class inherits from another, but what if a namespace
+    inherits? What would take precedence, the hierarchical parent namespace's
+    options, or the options of the python-level base class?
     """
     def __new__(cls, name, bases, attrs):
-        opts = NamespaceOptions(attrs.pop('Meta', None))
+        opts = NamespaceOptions(attrs.get('Meta', None))
         attrs['_meta'] = opts
         
-        # convert all functions to static ``apimethod``s.
+        # convert all functions to static ``apimethod``s
         for a in attrs:
             if isinstance(attrs[a], types.FunctionType) and not a in ['__new__']:
                 attrs[a] = apimethod(attrs[a])
@@ -180,7 +200,7 @@ class NamespaceMetaclass(type):
         # create the namespace
         self = type.__new__(cls, name, bases, attrs)
     
-        # pre-process: add references to this newly created namespaces to all
+        # post-process: add references to this newly created namespaces to all
         # sub-namespaces and methods.
         for a in attrs:
             attr = getattr(self, a)
@@ -193,7 +213,6 @@ class NamespaceMetaclass(type):
         return self
 
 class Namespace(object):
-    from django.newforms import ModelForm
     """
     Just used to identify the inner classes we care about. This allows the use
     of non-namespaces inner classes, as opposed to making every inner class a
@@ -385,8 +404,9 @@ class Dispatcher(object):
     # other) via headers or arguments. It's currently configured via the Meta
     # subclasses of an API, which is pretty flexible, but logicially it might
     # belong at the dispatcher level?
-    def __init__(self, api, response_class=default_response_class):
+    def __init__(self, api, response_class=None):
         self.api = api
+        if response_class is None: response_class = self.default_response_class
         self.response_class = response_class
 
     def __call__(self, *args, **kwargs):
@@ -433,15 +453,15 @@ class Dispatcher(object):
                 method = self.api.resolve(path)
                 if method: break;
             if method is None:
-                raise MethodNotFoundError()
+                raise MethodNotFoundError(method=path)
 
             # helper that returns the first "not None" item of a sequence
             first = lambda *a: filter(lambda x: x is not None, a)[0]
 
-            # validate api key: first, check if we we need to require a key at
-            # all, and if so, what the function doing the validation is. if
+            # Validate api key: first, check if we we need to require a key at
+            # all, and if so, what the function doing the validation is. If
             # there is no method-specific validator, try the one from the
-            # namespace. note that ``False`` means key auth is not required
+            # namespace. Note that ``False`` means key auth is not required
             # for this call.
             meta = method._namespace._meta
             check_key = getattr(method, 'check_key', None)
@@ -449,8 +469,10 @@ class Dispatcher(object):
                 check_key = meta.check_key
             # find the correct key to use, from arguments and http headers
             if check_key:
+                key_header = first(meta.key_header, 'X-APIKEY')
+                if key_header: key_header =  'HTTP_'+key_header
                 key = kwargs.pop(first(meta.key_argument, 'apikey'), None) or \
-                      request and request.META.get(first(meta.key_header, 'X-APIKEY'))
+                      request and request.META.get(key_header)
                 if not check_key(request, key):
                     raise InvalidKeyError()
 

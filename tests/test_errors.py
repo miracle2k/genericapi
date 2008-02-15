@@ -1,8 +1,5 @@
 """
-Test error handling (maybe merge with basic?)
-
- * custom error formatting is called and works
- * APIError http_status etc. works
+Test error handling.
 """
 
 from shared import *
@@ -28,6 +25,12 @@ def test_apierror_class():
     
     # make sure APIError provides default formatting
     assert APIError('error', code=2).data is not None
+    
+def test_builtin_errors():
+    """
+    Test the built-in error types.
+    """
+    assert MethodNotFoundError(method=['test']).method == ['test']
 
 def test_custom_formatting():
     """
