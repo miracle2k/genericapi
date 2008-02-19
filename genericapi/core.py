@@ -7,7 +7,6 @@ from django.conf import settings
 # TODO: implement signature enforcing (includes types, "int" etc).
 # TODO: case-sensitivity options
 # TODO: support namespaces that "consume" an element of the path
-# TODO: support JSONP callbacks
 # TODO: support per_method dispatching: api views are hooked manually into
 # urlconf, the dispatcher only resolves parameters.
 # TODO: introspection tools (e.g. list all methods...)
@@ -430,6 +429,68 @@ class Dispatcher(object):
         """
         raise NotImplementedError()
     del parse_request
+    
+    def make_response(self, requesst, response_class, data, *args, **kwargs):
+        """
+        Create an instance of ``response_class`` with ``data`` and all other
+        passed arguments.
+
+        This is a separate method to allow child classes to hook into the
+        process more easily.
+        """
+        return response_class(data, *args, **kwargs)
+    
+    def preprocess_call(self, request, method, args, kwargs):
+        """
+        Do  some preprocessing before a method is actually called. This checks
+        the API key, and also calls an API's ``process_call``, if defined.
+        
+        This is in a separate method to give child classes more hooks.
+        """
+        # helper that returns the first "not None" item of a sequence
+        first = lambda *a: filter(lambda x: x is not None, a)[0]
+
+        # Validate api key: first, check if we we need to require a key at
+        # all, and if so, what the function doing the validation is. If
+        # there is no method-specific validator, try the one from the
+        # namespace. Note that ``False`` means key auth is not required
+        # for this call.
+        meta = method._namespace._meta
+        check_key = getattr(method, 'check_key', None)
+        if check_key is None:
+            check_key = meta.check_key
+        # find the correct key to use, from arguments and http headers
+        if check_key:
+            key_header = first(meta.key_header, 'X-APIKEY')
+            if key_header: key_header =  'HTTP_'+key_header
+            key = kwargs.pop(first(meta.key_argument, 'apikey'), None) or \
+                  request and request.META.get(key_header)
+            if not check_key(request, key):
+                raise InvalidKeyError()
+
+        # handle pre-processing
+        process_call = getattr(method, 'process_call', None)
+        if process_call is None:
+            process_call = meta.process_call
+        # If a pre-processors was found, call it first. call processors
+        # may raise exceptions, or return a new ``apimethod`` object
+        # that will be called instead. Additionally, a return value of
+        # ``True`` will have no effect, while ``False`` will cause an
+        # exception to be raised.
+        # note that we cannot let the processor call the api view itself.
+        # As ``None`` is a valid response for api views, we would not be
+        # able to determine whether that has been done or not.
+        if process_call:
+            process_result = process_call(request, method, args, kwargs)
+            if process_result is False:
+                raise BadRequestError()
+            elif process_result is True:
+                pass
+            elif process_result:
+                method = process_result
+                
+        # return method (might have been modified)
+        return method
 
     def dispatch(self, request, url=None):
         """
@@ -457,47 +518,8 @@ class Dispatcher(object):
             if method is None:
                 raise MethodNotFoundError(method=path)
 
-            # helper that returns the first "not None" item of a sequence
-            first = lambda *a: filter(lambda x: x is not None, a)[0]
-
-            # Validate api key: first, check if we we need to require a key at
-            # all, and if so, what the function doing the validation is. If
-            # there is no method-specific validator, try the one from the
-            # namespace. Note that ``False`` means key auth is not required
-            # for this call.
-            meta = method._namespace._meta
-            check_key = getattr(method, 'check_key', None)
-            if check_key is None:
-                check_key = meta.check_key
-            # find the correct key to use, from arguments and http headers
-            if check_key:
-                key_header = first(meta.key_header, 'X-APIKEY')
-                if key_header: key_header =  'HTTP_'+key_header
-                key = kwargs.pop(first(meta.key_argument, 'apikey'), None) or \
-                      request and request.META.get(key_header)
-                if not check_key(request, key):
-                    raise InvalidKeyError()
-
-            # handle pre-processing
-            process_call = getattr(method, 'process_call', None)
-            if process_call is None:
-                process_call = meta.process_call
-            # If a pre-processors was found, call it first. call processors
-            # may raise exceptions, or return a new ``apimethod`` object
-            # that will be called instead. Additionally, a return value of
-            # ``True`` will have no effect, while ``False`` will cause an
-            # exception to be raised.
-            # note that we cannot let the processor call the api view itself.
-            # As ``None`` is a valid response for api views, we would not be
-            # able to determine whether that has been done or not.
-            if process_call:
-                process_result = process_call(request, method, args, kwargs)
-                if process_result is False:
-                    raise BadRequestError()
-                elif process_result is True:
-                    pass
-                elif process_result:
-                    method = process_result
+            # check api key, do call pre-processing
+            method = self.preprocess_call(request, method, args, kwargs)
 
             # call the first method found
             try:
@@ -530,4 +552,4 @@ class Dispatcher(object):
             from response import PythonResponse
             response_class = PythonResponse
 
-        return response_class(result).get_response()
+        return self.make_response(request, response_class, result).get_response()

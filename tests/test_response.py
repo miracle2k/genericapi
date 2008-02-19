@@ -86,3 +86,11 @@ def test_json_response():
     
     # check return mime type
     JsonResponse({}).get_response().mime_type = 'application/json'
+    
+    # test jsonp support
+    assert JsonResponse([1, True], jsonp_callback='call').\
+        get_response().content == 'call([1, true])'
+    # an empty callback string is allowed too, and will still cause a
+    # parenthesis  wrap
+    assert JsonResponse([1, True], jsonp_callback='').\
+        get_response().content == '([1, true])'

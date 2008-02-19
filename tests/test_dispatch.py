@@ -90,7 +90,7 @@ def test_json_dispatch():
     raises(BadRequestError, "dispatcher(make_request('/negate_bool/?d={['))")
     # the JSON value that failed is accessible via an attribute
     try: dispatcher(make_request('/negate_bool/?d={['))
-    except e: assert isinstance(e.value, basestring)
+    except Exception, e: assert isinstance(e.value, basestring)
     
     # mixed positional and keyword arguments
     assert dispatcher(make_request('/add/3?b=4')) == 7
@@ -110,6 +110,28 @@ def test_json_dispatch():
     assert dispatcher(make_request('/echo/-1')) == -1
     assert dispatcher(make_request('/echo/[1,2,3,4]')) == [1,2,3,4]
     assert dispatcher(make_request('/echo/{"a": 1, "b": 2}')) == {'a': 1, 'b': 2}
+    
+    # test jQuery compat mode: no special handling of '_' in standard mode
+    raises(BadRequestError, "dispatcher(make_request('/noop/?_=123'))")
+    dispatcher = JsonDispatcher(SampleAPI, jquery_compat=True, response_class=False)
+    # in compat mode, '_' is ignored (used by jQuery to force disable caching
+    # by passing a timestamp)
+    dispatcher(make_request('/noop/?_=123'))
+    
+    # test jsonp callbacks:
+    # 1) they are enabled by default
+    dispatcher(make_request('/noop/?jsonp=cb'))
+    # 2) they are passed along correctly to the response
+    dispatcher = JsonDispatcher(SampleAPI)
+    assert dispatcher(make_request('/noop/?jsonp=cb')).content == 'cb()'
+    # 3) custom argument name
+    dispatcher = JsonDispatcher(SampleAPI, jsonp_callback='mycb', response_class=False)
+    dispatcher(make_request('/noop/?mycb=cb'))
+    # 4) they can be disabled
+    dispatcher = JsonDispatcher(SampleAPI, jsonp_callback=False, response_class=False)
+    raises(BadRequestError, "dispatcher(make_request('/noop/?jsonp=cb'))")
+    
+    
 
 def test_rest_dispatch():
     """
