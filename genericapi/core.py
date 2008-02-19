@@ -1,6 +1,7 @@
 # encoding: utf-8
 import types, re
 from django.http import HttpResponse
+from django.conf import settings
 
 # TODO: how to handle 404 errors, get_object_or_404() ...
 # TODO: implement signature enforcing (includes types, "int" etc).
@@ -86,10 +87,10 @@ class APIError(Exception):
 
     Views can also return Exception instances instead of raising them.
     """
-    message = ""
-    def __init__(self, message=None, code=None,
+    name = 'API Error'
+    def __init__(self, message="", code=None,
                  http_status=None, http_headers=None):
-        if message: self.message = message
+        self.message = message
         self.code = code
         self.http_status, self.http_headers = http_status, http_headers
         
@@ -100,7 +101,8 @@ class APIError(Exception):
         """
         value = self.__dict__.get('data', None)
         if value is None:
-            value = {'error': self.message or True}
+            value = {'error': self.name +
+                              (self.message and ': '+self.message or "")}
             if self.code: value['code'] = self.code
         return value
     def _set_data(self, value):
@@ -108,16 +110,16 @@ class APIError(Exception):
     data = property(_get_data, _set_data)
     
 class MethodNotFoundError(APIError):
+    name = 'Method Not Found'
     def __init__(self, *args, **kwargs):
-        self.message = 'Method Not Found'
         self.method = kwargs.pop('method', None)
-        if self.method:
-            self.message += ': %s'%'.'.join(self.method)
         super(MethodNotFoundError, self).__init__(*args, **kwargs)
+        if self.method and not self.message:
+            self.message = '.'.join(self.method)
 class InvalidKeyError(APIError):
-    message = 'Invalid API Key'
+    name = 'Invalid API Key'
 class BadRequestError(APIError):
-    message = 'Bad Request'
+    name = 'Bad Request'
 
 class apimethod(object):
     """
@@ -504,7 +506,8 @@ class Dispatcher(object):
                 # finally, call the function itself.
                 result = method(request, *args, **kwargs)
             except TypeError, e:
-                raise BadRequestError()
+                if settings.DEBUG: raise BadRequestError(str(e))
+                else: raise BadRequestError()
 
         # Catch our own errors only. Everything else will bubble up to Django's
         # exception handling. If you don't want that, you can always write a

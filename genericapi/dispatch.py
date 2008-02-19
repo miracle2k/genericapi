@@ -25,6 +25,16 @@ class SimpleDispatcher(Dispatcher):
     def dispatch(self, name, request=None, *args, **kwargs):
         data = {'name': name, 'args': args, 'kwargs': kwargs}
         return super(SimpleDispatcher, self).dispatch(request, data)
+    
+class BadJsonError(BadRequestError):
+    """
+    Thrown by the JSON dispatcher if it encounters an invalid JSON value.
+    """
+    def __init__(self, value, *args, **kwargs):
+        super(BadJsonError, self).__init__(*args, **kwargs)
+        self.value = value
+        if self.value:
+            self.message = 'Invalid JSON (%s)'%self.value
 
 class JsonDispatcher(Dispatcher):
     """
@@ -55,7 +65,7 @@ class JsonDispatcher(Dispatcher):
         # convert the positional argument from json to python
         if argstr:
             try: args = [simplejson.loads(argstr)]
-            except ValueError, e: raise BadRequestError()
+            except ValueError, e: raise BadJsonError(argstr)
         else:
             args = []
 
@@ -63,7 +73,7 @@ class JsonDispatcher(Dispatcher):
         kwargs = {}
         for key, value in request.GET.items():
             try: kwargs[str(key)] = simplejson.loads(value)
-            except ValueError, e: raise BadRequestError()
+            except ValueError, e: raise BadJsonError(value)
         return [(path, args, kwargs,)]
 
     def parse_request(self, request, url):

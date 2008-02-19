@@ -85,9 +85,13 @@ def test_json_dispatch():
     # invalid keyword arguments
     raises(BadRequestError, "dispatcher(make_request('/add/?a=1'))")
     raises(BadRequestError, "dispatcher(make_request('/add/?a=1&b=2&c=1'))")
+    
     # [bug] invalid json raises a BadRequestError (and not say, a ValueError)
     raises(BadRequestError, "dispatcher(make_request('/negate_bool/?d={['))")
-
+    # the JSON value that failed is accessible via an attribute
+    try: dispatcher(make_request('/negate_bool/?d={['))
+    except e: assert isinstance(e.value, basestring)
+    
     # mixed positional and keyword arguments
     assert dispatcher(make_request('/add/3?b=4')) == 7
 
