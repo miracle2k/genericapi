@@ -32,7 +32,7 @@ class BadJsonError(BadRequestError):
     Thrown by the JSON dispatcher if it encounters an invalid JSON value.
     """
     def __init__(self, value, *args, **kwargs):
-        BadJsonError.__init__(self, *args, **kwargs)
+        BadRequestError.__init__(self, *args, **kwargs)
         self.value = value
         if self.value:
             self.message = 'Invalid JSON (%s)'%self.value
