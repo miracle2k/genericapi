@@ -6,8 +6,8 @@ from django.http import HttpRequest, QueryDict
 def make_request(url, method=None, post=None):
     r = HttpRequest()
     url = urlparse(url)
-    r.GET = QueryDict(url.query)
-    r.path = url.path
+    r.GET = QueryDict(url[4])  # url.query (2.5)
+    r.path = url[2]            # url.path (2.5)
     if method: r.method = method
     if post: r.POST.update(post)
     return r
