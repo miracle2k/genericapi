@@ -112,7 +112,7 @@ class MethodNotFoundError(APIError):
     name = 'Method Not Found'
     def __init__(self, *args, **kwargs):
         self.method = kwargs.pop('method', None)
-        super(MethodNotFoundError, self).__init__(*args, **kwargs)
+        MethodNotFoundError.__init__(self, *args, **kwargs)
         if self.method and not self.message:
             self.message = '.'.join(self.method)
 class InvalidKeyError(APIError):
