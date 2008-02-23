@@ -10,6 +10,12 @@ from django.conf import settings
 # TODO: support per_method dispatching: api views are hooked manually into
 # urlconf, the dispatcher only resolves parameters.
 # TODO: introspection tools (e.g. list all methods...)
+# TODO: allow api key keyword argument even if a method does not have a
+# check_key handler, as long as a keyword-argument name is set. only if the
+# latter is missing too is usage completely disabled; this brings the apikey
+# argument in line with the apikey header, which can be passed regardless as
+# well.
+
 
 __all__ = (
     'expose', 'conceal', 'check_key', 'process_call',
@@ -88,7 +94,7 @@ class APIError(Exception):
     """
     name = 'API Error'
     def __init__(self, message="", code=None,
-                 http_status=None, http_headers=None):
+                 http_status=500, http_headers=None):
         self.message = message
         self.code = code
         self.http_status, self.http_headers = http_status, http_headers
